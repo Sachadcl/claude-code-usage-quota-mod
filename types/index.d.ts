@@ -43,9 +43,6 @@ declare module 'claude-code' {
       /** the choice the band is asking for: the context was already past a new % */
       autoAsk: { at: number; percent: number } | null
       hold: Hold
-      /** bumped on every % set: draws the field afresh even when the value is unchanged */
-      fieldTick: number
-      fieldText: string | null
       /** the desktop app's theme, as its settings (or the OS) have it */
       theme: 'dark' | 'light'
       /** the prompt cache as this chat's last reply left it; null before any reply */

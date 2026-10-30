@@ -80,9 +80,9 @@ function answerRest(on: On, status: (string | undefined)[]) {
 
 const MEASURE = { context: { window: 1_000_000, tokens: 158_000, percent: 16 }, rateLimits: [] }
 
-// the % field is drawn afresh after every set, under a new key
-async function fieldKey(ui: { find: (q: { type: 'Input' }) => Promise<{ props: { key?: string } } | undefined> }): Promise<string> {
-  return String((await ui.find({ type: 'Input' }))?.props.key)
+// the % the stepper shows (bold, unlike the band's other bare %s)
+async function shownAt(ui: { findAll: (q: { type: 'Text' }) => Promise<{ text?: string; props: { bold?: boolean } }[]> }): Promise<string | undefined> {
+  return (await ui.findAll({ type: 'Text' })).find(t => t.props.bold && /^\d+%$/.test(String(t.text)))?.text
 }
 
 test('draws the band on track', async ($, on) => {
@@ -589,48 +589,20 @@ test('auto compact: the switch shows the field, and it compacts between turns on
   await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
 
   const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
-  expect(await ui.find({ type: 'Input' })).toBeUndefined()
+  expect(await ui.find({ key: 'autoUp' })).toBeUndefined()
   await ui.press({ key: 'auto' })
   expect((await ui.find({ type: 'Svg', alt: 'Auto compact on' }))).toBeDefined()
-  // the field takes digits; the % sits beside it
-  expect((await ui.find({ type: 'Input' }))?.props.submitLabel).not.toBe('set')
-  // 100 becomes 99 with a note
-  await ui.input({ key: await fieldKey(ui), text: '100' })
+  expect(await shownAt(ui)).toBe('30%')
+  // − and + step by 5, held between 15 and 99
+  for (const _ of [1, 2, 3, 4]) await ui.press({ key: 'autoDown' })
+  expect(await shownAt(ui)).toBe('15%')
+  for (const _ of Array(20)) await ui.press({ key: 'autoUp' })
+  expect(await shownAt(ui)).toBe('99%')
+  await ui.press({ key: 'autoDown' })
+  expect(await shownAt(ui)).toBe('95%')
+  for (const _ of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]) await ui.press({ key: 'autoDown' })
+  expect(await shownAt(ui)).toBe('40%')
   expect(ran).toEqual([])
-  expect((await ui.find({ type: 'Input' }))?.props.value).toBe('99')
-  // below 15 becomes 15, each time; over 99 is 99 each time; blank is 30
-  for (const [typed, shown] of [['5', '15'], ['0', '15'], ['14', '15'], ['100', '99'], ['250', '99'], ['', '30'], ['20', '20']]) {
-    await ui.input({ key: await fieldKey(ui), text: typed })
-    expect((await ui.find({ type: 'Input' }))?.props.value).toBe(shown)
-  }
-  // digits only, 3 at most: letters, signs and pasted text are dropped as they arrive
-  await ui.input({ key: await fieldKey(ui), text: '2a', kind: 'change' })
-  expect(String((await ui.find({ type: 'Input' }))?.props.value).replace(/​/g, '')).toBe('2')
-  await ui.input({ key: await fieldKey(ui), text: '2', kind: 'change' })
-  await ui.input({ key: await fieldKey(ui), text: '2+', kind: 'change' })
-  expect(String((await ui.find({ type: 'Input' }))?.props.value).replace(/​/g, '')).toBe('2')
-  await ui.input({ key: await fieldKey(ui), text: 'fix the bug -25 now', kind: 'change' })
-  expect((await ui.find({ type: 'Input' }))?.props.value).toBe('25')
-  await ui.input({ key: await fieldKey(ui), text: '123456', kind: 'change' })
-  expect((await ui.find({ type: 'Input' }))?.props.value).toBe('123')
-  await ui.input({ key: await fieldKey(ui), text: '-25' })
-  expect((await ui.find({ type: 'Input' }))?.props.value).toBe('25')
-  await ui.input({ key: await fieldKey(ui), text: '20' })
-  // typing sets nothing while it goes on; resting 2s counts as clicking away, once
-  await ui.input({ key: await fieldKey(ui), text: '4', kind: 'change' })
-  await clock.advance(1_500)
-  await ui.input({ key: await fieldKey(ui), text: '45', kind: 'change' })
-  await clock.advance(1_500)
-  expect((await ui.find({ type: 'Input' }))?.props.value).toBe('20')
-  await clock.advance(600)
-  expect((await ui.find({ type: 'Input' }))?.props.value).toBe('45')
-  // a press elsewhere in the band sets a draft at once
-  await ui.input({ key: await fieldKey(ui), text: '7', kind: 'change' })
-  await ui.press({ key: 'collapse' })
-  await ui.press({ key: 'collapse' })
-  expect((await ui.find({ type: 'Input' }))?.props.value).toBe('15')
-  await ui.input({ key: await fieldKey(ui), text: '40' })
-  expect((await ui.find({ type: 'Input' }))?.props.value).toBe('40')
 
   // past it mid-turn: nothing until the turn ends, then at once
   await $.turn.start({ text: 'go', turnId: 't1' } as never)
@@ -665,7 +637,8 @@ test('auto compact set below the context asks in the band, and "Now" compacts', 
 
   const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
   await ui.press({ key: 'auto' })
-  await ui.input({ key: await fieldKey(ui), text: '40' })
+  await ui.press({ key: 'autoUp' })
+  await ui.press({ key: 'autoUp' })
   await clock.advance(1_100)
   // asked in the band, never through the chat's question dialog
   expect(asked).toEqual([])
@@ -679,28 +652,28 @@ test('auto compact set below the context asks in the band, and "Now" compacts', 
 })
 
 test('"After my next compact" holds through a % flickering below, until a real compaction', async ($, on) => {
-  const percent: { value: number; isCompacted?: boolean } = { value: 17 }
+  const percent: { value: number; isCompacted?: boolean } = { value: 20 }
   const ran: string[] = []
   const clock = startWorld(on, percent, ran)
   await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
 
   const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
   await ui.press({ key: 'auto' })
-  await ui.input({ key: await fieldKey(ui), text: '19' })
+  await ui.press({ key: 'autoDown' })
   expect(await ui.find({ type: 'Text', text: /already at/ })).toBeUndefined()
-  await ui.input({ key: await fieldKey(ui), text: '17' })
-  expect(await ui.find({ type: 'Text', text: /already at 17%, past 17%/ })).toBeDefined()
+  await ui.press({ key: 'autoDown' })
+  expect(await ui.find({ type: 'Text', text: /already at 20%, past 20%/ })).toBeDefined()
   // still asking: a dip below and back, then a turn's end, compacts nothing
-  percent.value = 16.4
+  percent.value = 19.4
   await clock.advance(3_000)
-  percent.value = 18
+  percent.value = 21
   await $.turn.complete(TURN)
   await clock.advance(1_100)
   expect(ran).toEqual([])
   await ui.press({ key: 'askNext' })
-  percent.value = 16.4
+  percent.value = 19.4
   await clock.advance(3_000)
-  percent.value = 18
+  percent.value = 21
   await $.turn.complete(TURN)
   await clock.advance(1_100)
   expect(ran).toEqual([])
@@ -709,7 +682,7 @@ test('"After my next compact" holds through a % flickering below, until a real c
   percent.isCompacted = true
   await clock.advance(3_000)
   percent.isCompacted = false
-  percent.value = 18
+  percent.value = 21
   await $.turn.complete(TURN)
   await clock.advance(1_100)
   expect(ran).toEqual(['compact'])
@@ -729,7 +702,7 @@ test('auto compact is per chat: another chat opens with it off, at 30%; turned o
   const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
   expect(await ui.find({ type: 'Svg', alt: 'Auto compact off' })).toBeDefined()
   await ui.press({ key: 'auto' })
-  expect((await ui.find({ type: 'Input' }))?.props.value).toBe('30')
+  expect(await shownAt(ui)).toBe('30%')
   expect(await ui.find({ type: 'Text', text: /already at 35%, past 30%/ })).toBeDefined()
   // left unanswered: as "after my next compact"
   await $.turn.complete(TURN)
@@ -888,7 +861,7 @@ test('the settings saved under the old plugin name are copied over once, never o
   expect(listed.filter(path => /plugins/.test(path))).toEqual([expect.stringMatching(/home[\\/]me[\\/]\.claude[\\/]plugins[\\/]store$/)])
   const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
   expect(await ui.find({ type: 'Svg', alt: 'Auto compact on' })).toBeDefined()
-  expect((await ui.find({ type: 'Input' }))?.props.value).toBe('40')
+  expect(await shownAt(ui)).toBe('40%')
   // collapsed was already set here: kept as it is
   expect(await ui.find({ text: 'Weekly' })).toBeDefined()
   await ui.unmount()

@@ -7,9 +7,7 @@ const snapshot = atom({ plugin: 'usage-quota', key: 'snapshot' } as const, null)
 const isOn = atom({ plugin: 'usage-quota', key: 'isOn' } as const, true)
 const isCollapsed = atom({ plugin: 'usage-quota', key: 'isCollapsed' } as const, false)
 const autoCompact = atom({ plugin: 'usage-quota', key: 'autoCompact' } as const, { isOn: false, at: null } as AutoCompact)
-const fieldTick = atom({ plugin: 'usage-quota', key: 'fieldTick' } as const, 0)
 // the % field's text while typing is cleaned (digits only, 3 at most); null: the set %
-const fieldText = atom({ plugin: 'usage-quota', key: 'fieldText' } as const, null as string | null)
 const theme = atom({ plugin: 'usage-quota', key: 'theme' } as const, 'dark' as 'dark' | 'light')
 const autoAsk = atom({ plugin: 'usage-quota', key: 'autoAsk' } as const, null as { at: number; percent: number } | null)
 // what holds auto compact back, and in which chat: kept in state so a reload (an
@@ -24,7 +22,7 @@ const coldHintOff = atom({ plugin: 'usage-quota', key: 'coldHintOff' } as const,
 // app shows (Theme), set at the start of every draw so all colours below follow it
 type Palette = {
   muted: string; green: string; greenText: string; amber: string; red: string; free: string; buffer: string; track: string
-  palette: string[]; named: Record<string, string>; switchOff: string; switchOn: string; switchLit: string; compactLit: string
+  palette: string[]; named: Record<string, string>; switchOff: string; switchOn: string; compactLit: string
   warm: string; cold: string; pillInk: string
 }
 const DARK: Palette = {
@@ -35,7 +33,7 @@ const DARK: Palette = {
     Tools: '#a78bfa', Other: '#8b90a0', 'System prompt': '#a78bfa', 'System tools': '#60a5fa', 'MCP tools': '#f472b6',
     'Custom agents': '#34d399', 'Memory files': '#fbbf24', Skills: '#fb923c', Messages: '#22d3ee',
   },
-  switchOff: '#4b5163', switchOn: '#4ade80', switchLit: '#8b919c', compactLit: '#5a606e',
+  switchOff: '#4b5163', switchOn: '#4ade80', compactLit: '#5a606e',
   warm: '#4ade80', cold: '#94a3b8', pillInk: '#1b1d24',
 }
 // light: the same hues, deep enough to read on the pale band; the tracks pale
@@ -47,7 +45,7 @@ const LIGHT: Palette = {
     Tools: '#8b5cf6', Other: '#5b6070', 'System prompt': '#8b5cf6', 'System tools': '#3b82f6', 'MCP tools': '#ec4899',
     'Custom agents': '#10b981', 'Memory files': '#f59e0b', Skills: '#f97316', Messages: '#0ea5e9',
   },
-  switchOff: '#b4b9c4', switchOn: '#22c55e', switchLit: '#c3c7cf', compactLit: '#d6d9df',
+  switchOff: '#b4b9c4', switchOn: '#22c55e', compactLit: '#d6d9df',
   warm: '#22b856', cold: '#64748b', pillInk: '#ffffff',
 }
 let MUTED = DARK.muted
@@ -62,8 +60,6 @@ let PALETTE = DARK.palette
 let NAMED = DARK.named
 let SWITCH_OFF = DARK.switchOff
 let SWITCH_ON = DARK.switchOn
-// the light behind the switch under the pointer: drawn beneath the pill, never over it
-let SWITCH_LIT = DARK.switchLit
 // Compact's hover: clearly lighter than its resting chrome, its label still reads
 let COMPACT_LIT = DARK.compactLit
 // the cache's pill by what it means: green while the cache holds (replies are cheap),
@@ -73,7 +69,7 @@ let COLD = DARK.cold
 let PILL_INK = DARK.pillInk
 function usePalette(p: Palette): void {
   ;({ muted: MUTED, green: GREEN, greenText: GREEN_TEXT, amber: AMBER, red: RED, free: FREE, buffer: BUFFER, track: TRACK } = p)
-  ;({ palette: PALETTE, named: NAMED, switchOff: SWITCH_OFF, switchOn: SWITCH_ON, switchLit: SWITCH_LIT, compactLit: COMPACT_LIT } = p)
+  ;({ palette: PALETTE, named: NAMED, switchOff: SWITCH_OFF, switchOn: SWITCH_ON, compactLit: COMPACT_LIT } = p)
   ;({ warm: WARM, cold: COLD, pillInk: PILL_INK } = p)
 }
 const CELLS = 16
@@ -275,6 +271,8 @@ const SWITCH_PAD = 3
 // the cells the switch's box takes: the press under it is clipped to this, so the
 // app's own button tint can't spill onto the text beside it
 const SWITCH_CELLS = 4
+// the % stepper: −, the % (up to "99%") and +
+const FIELD_CELLS = 6
 // the box behind the switch measures a pixel off the drawing (19px tall, 31 wide):
 // the pill is drawn half a pixel down and right so it sits in the light's centre
 const SWITCH_NUDGE = 0.5
@@ -1011,67 +1009,18 @@ async function loadAuto($: EngineInterface): Promise<void> {
   await update($, autoAsk, () => null)
 }
 
-// the % field sets on Enter, or when the focus leaves it with an unset draft (a
-// click elsewhere in the band, or the next prompt sent); 15 to 99, outside is pulled
-// in. After a set the field is drawn afresh (fieldTick), which also drops its focus
+// the % is set with − and +, by steps of 5, from 15 to 99 (a typed field drew an
+// Enter chip of its own on the desktop, over its digits)
 const AT_MIN = 15
-// the % whenever there is none: a blank field, a first switch-on
+// the % whenever there is none: a first switch-on
 const AT_DEFAULT = 30
 const AT_MAX = 99
-let draftAt: string | null = null
+const AT_STEP = 5
 
-// no event says a click landed outside the band, so a draft also sets itself once
-// typing has rested a while, as if the person had clicked away
-const AT_REST_MS = 2_000
-let restTimer: { cancel(): void } | null = null
-
-// the field takes digits only, 3 at most: anything else typed or pasted is dropped
-// as it arrives, by drawing the field's text again cleaned
-const AT_DIGITS = 3
-// a mark of no width, so a cleaned text equal to the one drawn still redraws (an
-// unchanged value would leave the typing as it is) without a new field losing focus
-const NO_WIDTH = '\u200b'
-
-function cleanAt(value: string): string {
-  return value.replace(/\D/g, '').slice(0, AT_DIGITS)
-}
-
-// what the field shows comes from state, not a module variable: a press or a typing
-// runs apart from the draw, so a value the draw kept would not be seen here
-async function redrawField($: EngineInterface, value: string): Promise<void> {
-  const at = (await read($, autoCompact)).at ?? AT_DEFAULT
-  await update($, fieldText, drawn => (value === (drawn ?? `${at}`) ? value + NO_WIDTH : value))
-}
-
-function typedAt($: EngineInterface, raw: string): void {
-  const value = cleanAt(raw)
-  if (value !== raw) void redrawField($, value)
-  draftAt = value
-  restTimer?.cancel()
-  restTimer = $.clock.after(AT_REST_MS, () => {
-    restTimer = null
-    void commitDraft($)
-  })
-}
-
-async function commitDraft($: EngineInterface): Promise<void> {
-  if (draftAt === null) return
-  await commitAt($, draftAt)
-}
-
-async function commitAt($: EngineInterface, value: string): Promise<void> {
-  draftAt = null
-  restTimer?.cancel()
-  restTimer = null
-  const text = cleanAt(value)
-  // only digits reach here: blank is the default, out of range is pulled in, every time
-  const typed = text === '' ? AT_DEFAULT : Number(text)
-  const at = Math.min(AT_MAX, Math.max(AT_MIN, typed))
-  if (typed !== at) $.ui.toast(`Auto compact: ${typed < at ? 'the least' : 'the most'} is ${at}% – set to ${at}%`)
-  await setThreshold($, at)
-  // a new field every time (its key changes), so it shows the set value whatever was typed
-  await update($, fieldText, () => null)
-  await update($, fieldTick, n => n + 1)
+// one step down or up, onto the steps (99 goes down to 95, 95 up to 99)
+function steppedAt(at: number, way: -1 | 1): number {
+  const next = way > 0 ? Math.floor(at / AT_STEP) * AT_STEP + AT_STEP : Math.ceil(at / AT_STEP) * AT_STEP - AT_STEP
+  return Math.min(AT_MAX, Math.max(AT_MIN, next))
 }
 
 // a new threshold: armed when the context is below it, else the band asks, in its
@@ -1304,22 +1253,6 @@ export const register: Register = on => {
     return result
   })
 
-  // the focus leaving the % field sets what was typed in it
-  on('ui.focus', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (!e.element?.startsWith('autoAt')) await commitDraft($)
-    return next(e)
-  }).catch(($, e, next) => next(e)) // a draft that fails to set never holds the focus back
-
-  on('ui.press', { component: 'AbovePrompt' }, async ($, e, next) => {
-    await commitDraft($)
-    return next(e)
-  })
-
-  on('prompt.edit', async ($, e, next) => {
-    void commitDraft($)
-    return next(e)
-  })
-
   on('turn.start', async ($, e, next) => {
     isBusy = true
     if (isOpening) {
@@ -1329,7 +1262,6 @@ export const register: Register = on => {
         spikeFrom = { at: await $.clock.now(), limits: snap.limits }
       }
     }
-    await commitDraft($)
     return next(e)
   })
 
@@ -1369,7 +1301,7 @@ export const register: Register = on => {
     if (!snap) return next(e)
 
     const table = $.ui.resolve(e)
-    const { Box, Text, Button, Input } = table
+    const { Box, Text, Button } = table
     const Svg = e.surface === 'desktop' && 'Svg' in table ? table.Svg : undefined
     usePalette(e.surface === 'desktop' && (await read($, theme)) === 'light' ? LIGHT : DARK)
     const width = Math.max(20, e.props.bodyColumns)
@@ -1417,9 +1349,11 @@ export const register: Register = on => {
     const showHistory = !collapsed && snap.history !== undefined && (await read($, isHistory))
     const auto = await read($, autoCompact)
     const ask = await read($, autoAsk)
-    const tick = await read($, fieldTick)
-    const drawnAt = (await read($, fieldText)) ?? `${auto.at ?? AT_DEFAULT}`
-    const submitAt = (value: string) => commitAt($, value)
+    const drawnAt = auto.at ?? AT_DEFAULT
+    const stepAt = (way: -1 | 1) => {
+      const at = steppedAt(drawnAt, way)
+      if (at !== drawnAt) void setThreshold($, at)
+    }
     const toggleAuto = () => {
       const flipped = { isOn: !auto.isOn, at: auto.at ?? AT_DEFAULT }
       void saveAuto($, flipped).then(() =>
@@ -1461,9 +1395,10 @@ export const register: Register = on => {
             then a wide gap so the field reads as the switch's, not Compact's */}
         {Svg ? (
           <Box key="autoSwitch" width={SWITCH_CELLS} height={1} overflow="hidden">
-            {/* three layers, each the box's full size, so all share one centre: the
-                rounded light (unlit: an invisible border), the pill, the press */}
-            <Box position="absolute" top={0} left={0} width={SWITCH_CELLS} height={1} borderStyle="round" borderColor={CLEAR} hover={{ backgroundColor: SWITCH_LIT, borderColor: SWITCH_LIT }} />
+            {/* two layers, each the box's full size, so both share one centre: the
+                pill, the press. No light under the pointer, as a switch like this has
+                none: a lit bordered Box stood taller than the row, and a light shown on
+                hover drew away from the switch, as a pop-up */}
             <Box position="absolute" top={0} left={0} width={SWITCH_CELLS} height={1} alignItems="center" justifyContent="center">
               <Svg alt={`Auto compact ${auto.isOn ? 'on' : 'off'}`} source={switchSvg(auto.isOn)} width={SWITCH_W} height={SWITCH_H} />
             </Box>
@@ -1477,37 +1412,32 @@ export const register: Register = on => {
         )}
         <Text color={auto.isOn ? undefined : MUTED}>Auto compact</Text>
         {auto.isOn ? (
-          // the field (3 digits) sets itself once typing pauses; a plain % right after it
-          <Box flexDirection="row" alignItems="center">
-            {/* the field's Enter chip can't be turned off: the field is drawn wider than
-                its box and the box clips the chip away */}
-            <Box width={4} overflow="hidden">
-              <Box width={6} flexShrink={0}>
-                <Input
-                  key={`autoAt${tick}`}
-                  value={drawnAt}
-                  submitLabel={'\u200b'}
-                  onInput={value => typedAt($, value)}
-                  onSubmit={value => submitAt(value)}
-                />
-              </Box>
+          // − 30% +: each press sets the % at once
+          <Box flexDirection="row" alignItems="center" flexShrink={0}>
+            <Box key="autoLess" flexShrink={0}>
+              <Button key="autoDown" label="−" plain hover={{ backgroundColor: COMPACT_LIT }} onPress={() => stepAt(-1)} />
             </Box>
-            <Text color={MUTED}>%</Text>
+            <Box width={FIELD_CELLS - 2} flexShrink={0} justifyContent="center">
+              <Text bold>{`${drawnAt}%`}</Text>
+            </Box>
+            <Box key="autoMore" flexShrink={0}>
+              <Button key="autoUp" label="+" plain hover={{ backgroundColor: COMPACT_LIT }} onPress={() => stepAt(1)} />
+            </Box>
           </Box>
         ) : Svg ? (
           // off: the field's room is kept, unseen, so the switch sits at the very same
           // spot and draws pixel for pixel as when on
-          <Box flexDirection="row" alignItems="center">
-            <Box width={4} />
-            <Text color={CLEAR}>%</Text>
+          <Box width={FIELD_CELLS} flexShrink={0} />
+        ) : null}
+        {/* each button in a box of its own: in one shared box the pointer over either
+            lit both */}
+        {!collapsed && snap.history ? (
+          <Box key="historyBox" flexShrink={0}>
+            <Button key="history" label={showHistory ? 'Usage' : 'History'} plain hover={{ backgroundColor: COMPACT_LIT }} onPress={() => void update($, isHistory, v => !v)} />
           </Box>
         ) : null}
-        <Box key="compactBox" flexDirection="row" alignItems="center" columnGap={1}>
-          {/* the history in place of the limits and the context, and back */}
-          {!collapsed && snap.history ? (
-            <Button key="history" label={showHistory ? 'Usage' : 'History'} plain hover={{ backgroundColor: COMPACT_LIT }} onPress={() => void update($, isHistory, v => !v)} />
-          ) : null}
-          {!collapsed && snap.history ? <Text color={MUTED}>·</Text> : null}
+        {!collapsed && snap.history ? <Text color={MUTED}>·</Text> : null}
+        <Box key="compactBox" flexShrink={0}>
           <Button key="compact" label="Compact" plain hover={{ backgroundColor: COMPACT_LIT }} onPress={() => compactNow($)} />
         </Box>
         <Button
