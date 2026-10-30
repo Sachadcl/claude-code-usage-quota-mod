@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionRateLimit } from 'claude-code'
 
-import type { AutoCompact, Cache, Category, Hold, Limit, PaceOf, Snapshot } from '../types'
+import type { AutoCompact, Cache, Category, History, HistoryBar, Hold, Limit, PaceOf, Snapshot } from '../types'
 
 const snapshot = atom({ plugin: 'usage-quota', key: 'snapshot' } as const, null)
 const isOn = atom({ plugin: 'usage-quota', key: 'isOn' } as const, true)
@@ -16,6 +16,8 @@ const autoAsk = atom({ plugin: 'usage-quota', key: 'autoAsk' } as const, null as
 // update, /reload-plugins) keeps it, where a module variable would start over
 const hold = atom({ plugin: 'usage-quota', key: 'hold' } as const, { chat: '', waits: false, stuck: false } as Hold)
 const cache = atom({ plugin: 'usage-quota', key: 'cache' } as const, null as Cache | null)
+const historyBy = atom({ plugin: 'usage-quota', key: 'historyBy' } as const, 'days' as 'days' | 'weeks')
+const isHistory = atom({ plugin: 'usage-quota', key: 'isHistory' } as const, false)
 
 // two palettes, the desktop's dark and light themes; the band draws in the one the
 // app shows (Theme), set at the start of every draw so all colours below follow it
@@ -399,6 +401,14 @@ async function fetchPlan($: EngineInterface): Promise<Limit[] | null> {
 
 type Saved = { at: number; limits: Limit[] }
 
+// why an ask failed, in a few words: the service's own answer as it is, a request that
+// never got there (no network, a lookup that failed) as "no network"
+function shortError(message: string): string {
+  if (/^(refused|failed) \(/.test(message) || message === 'answer had no limits') return message
+  if (/ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|network|timed? ?out/i.test(message)) return 'failed (no network)'
+  return 'failed'
+}
+
 // this chat's own reading from its replies, and when it last changed
 let live: Saved | undefined
 
@@ -503,7 +513,7 @@ async function limitsOf(
   const limits = (pick?.limits ?? []).map(l =>
     l.resetsAt !== undefined && Date.parse(l.resetsAt) <= now ? { kind: l.kind, percentUsed: 0 } : finer(l),
   )
-  return { limits, at: pick?.at, error: backoff?.error || undefined }
+  return { limits, at: pick?.at, error: backoff?.error ? shortError(backoff.error) : undefined }
 }
 
 // What the forecast learns, shared by every chat through the store: how far each past
@@ -573,6 +583,255 @@ async function trackPace($: EngineInterface, limits: Limit[], now: number): Prom
   }
   if (isChanged) await storeSet($, 'pace', saved)
   return pace
+}
+
+// The history: what the weekly limit went to, kept for every chat. Each rise of the
+// weekly % is added to the day it happened in (one shared last reading, so two chats
+// seeing the same rise count it once); each weekly window keeps the peak it reached.
+// The first reading ever only sets the start: the week before it is no one day's.
+const DAYS_KEPT = 28
+const DAYS_SHOWN = 14
+const WEEKS_KEPT = 8
+type HistoryStore = {
+  last?: { resetsAt: string; percent: number }
+  days: Record<string, number>
+  weeks: { resetsAt: number; peak: number }[]
+}
+const dayKey = (t: number) => new Date(t).toLocaleDateString('en-CA')
+
+async function trackHistory($: EngineInterface, limits: Limit[], now: number): Promise<History> {
+  const saved = ((await storeGet($, 'history')) as HistoryStore | undefined) ?? { days: {}, weeks: [] }
+  let isChanged = false
+  const week = limits.find(l => l.kind === 'seven_day')
+  const resetsAt = week?.resetsAt ? Date.parse(week.resetsAt) : NaN
+  if (week?.resetsAt && Number.isFinite(resetsAt) && resetsAt > now) {
+    const last = saved.last
+    const isSame = last !== undefined && sameWindow(last.resetsAt, week.resetsAt)
+    // a new window starts from 0: all of its % is new
+    const rise = !last ? 0 : isSame ? week.percentUsed - last.percent : week.percentUsed
+    if (rise > 0) {
+      const today = dayKey(now)
+      saved.days[today] = Math.round(((saved.days[today] ?? 0) + rise) * 10) / 10
+    }
+    // a reading a little under the last (the figures round) is no fall to count again
+    if (!isSame || week.percentUsed > last!.percent) {
+      saved.last = { resetsAt: week.resetsAt, percent: week.percentUsed }
+      isChanged = true
+    }
+    const w = saved.weeks.find(x => Math.abs(x.resetsAt - resetsAt) <= SAME_WINDOW_MS)
+    if (!w) {
+      saved.weeks = [...saved.weeks, { resetsAt, peak: week.percentUsed }].slice(-WEEKS_KEPT)
+      isChanged = true
+    } else if (week.percentUsed > w.peak) {
+      w.peak = week.percentUsed
+      isChanged = true
+    }
+    const oldest = dayKey(now - DAYS_KEPT * 24 * HOUR)
+    for (const key of Object.keys(saved.days)) {
+      if (key < oldest) {
+        delete saved.days[key]
+        isChanged = true
+      }
+    }
+    if (isChanged) await storeSet($, 'history', saved)
+    // the days before the band, once, from the chats' records (on a timer: the work
+    // outlives this refresh)
+    if (saved.last && saved.last.percent >= 1 && !isBackfilling && (await storeGet($, 'historyBackfill')) !== BACKFILL_VERSION) {
+      $.clock.after(0, () => void backfillHistory($))
+    }
+  }
+  // the last 14 days, today last, a day with nothing at 0
+  const days: HistoryBar[] = []
+  for (let i = DAYS_SHOWN - 1; i >= 0; i--) {
+    const key = dayKey(now - i * 24 * HOUR)
+    days.push({ key, percent: saved.days[key] ?? 0 })
+  }
+  const weeks = saved.weeks.map(w => ({ key: new Date(w.resetsAt).toISOString(), percent: w.peak }))
+  return { days, weeks }
+}
+
+// the history's bars, three rows tall: one column per slot of 1000 units, stretched to
+// the box as the other bars are (a drawing that kept its proportions grew taller than its
+// box and spilled out of the band); the last (today, this week) in the lead colour, an
+// empty one a sliver of track so every day still reads
+const CHART_PX = 44
+function chartSvg(bars: HistoryBar[], color: string, lead: string): string {
+  const max = Math.max(1, ...bars.map(b => b.percent))
+  const slot = 1000 / Math.max(1, bars.length)
+  const w = slot * 0.6
+  const rects = bars
+    .map((b, i) => {
+      const h = b.percent > 0 ? Math.max(3, (b.percent / max) * CHART_PX) : 1.5
+      const x = i * slot + (slot - w) / 2
+      const fill = b.percent > 0 ? (i === bars.length - 1 ? lead : color) : TRACK
+      return `<rect x="${x.toFixed(1)}" y="${(CHART_PX - h).toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" fill="${fill}"/>`
+    })
+    .join('')
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="${CHART_PX}" viewBox="0 0 1000 ${CHART_PX}" preserveAspectRatio="none">${rects}</svg>`
+}
+// the terminal's bars: three block characters a column (level 0 the lowest), filled
+// from the bottom, as tall as its share of the highest
+const BLOCKS = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
+function blockOf(percent: number, max: number, level: 0 | 1 | 2): string {
+  if (percent <= 0) return level === 0 ? '▁' : ' '
+  const eighths = Math.max(1, Math.ceil((percent / Math.max(1, max)) * 24)) - level * 8
+  return eighths <= 0 ? ' ' : BLOCKS[Math.min(8, eighths) - 1]!
+}
+
+// The days before the band was installed, read back once from the chats' own records
+// (the transcripts under ~/.claude/projects carry every reply's tokens and time). Tokens
+// are weighed as the plan prices them (output 5x input, cache writes 1.25x, or 2x for an
+// hour, cache reads 0.1x; Opus 5x Haiku, others 3x), then turned into the weekly % by
+// this week's own ratio: the % used now over what this week's replies weighed. An
+// estimate: replies on other devices are not here, and land in this week's ratio.
+const BACKFILL_MS = WEEKS_KEPT * 7 * 24 * HOUR
+// v1 could not open a transcript over 4 MiB, and scaled from the small ones alone: v2
+// reads them all once more, and its estimate replaces v1's
+const BACKFILL_VERSION = 2
+let isBackfilling = false
+const modelWeight = (model: string | undefined) => (model?.includes('opus') ? 5 : model?.includes('haiku') ? 1 : 3)
+type Usage = {
+  input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null
+  cache_creation?: { ephemeral_1h_input_tokens?: number; ephemeral_5m_input_tokens?: number } | null
+}
+function weigh(u: Usage, model: string | undefined): number {
+  const writes = u.cache_creation
+    ? (u.cache_creation.ephemeral_1h_input_tokens ?? 0) * 2 + (u.cache_creation.ephemeral_5m_input_tokens ?? 0) * 1.25
+    : (u.cache_creation_input_tokens ?? 0) * 1.25
+  return ((u.input_tokens ?? 0) + writes + (u.cache_read_input_tokens ?? 0) * 0.1 + (u.output_tokens ?? 0) * 5) * modelWeight(model)
+}
+
+// A transcript can run to tens of MB, past the 4 MiB one read may take: awk on the host
+// pulls each reply's figures out (a line of them a reply, a few hundred kB in all), and
+// a host without awk, or a test, falls back to reading the file whole when it fits
+const AWK = String.raw`
+function v(k, re,  s) { if (!match($0, "\"" k "\":" re)) return ""; s = substr($0, RSTART + length(k) + 3, RLENGTH - length(k) - 3); gsub(/"/, "", s); return s }
+/"type":"assistant"/ && /"usage"/ {
+  print v("timestamp", "\"[^\"]*\"") "\t" v("id", "\"msg_[^\"]*\"") "\t" v("model", "\"[^\"]*\"") "\t" v("input_tokens", "[0-9]+") "\t" v("output_tokens", "[0-9]+") "\t" v("cache_read_input_tokens", "[0-9]+") "\t" v("cache_creation_input_tokens", "[0-9]+") "\t" v("ephemeral_1h_input_tokens", "[0-9]+") "\t" v("ephemeral_5m_input_tokens", "[0-9]+")
+}`
+type Reply = { at: number; id: string; model?: string; usage: Usage }
+async function repliesIn($: EngineInterface, file: string): Promise<Reply[]> {
+  const replies: Reply[] = []
+  try {
+    const { exitCode, stdout } = await $.process.run(['awk', AWK, file], { timeoutMs: 60_000 })
+    if (exitCode === 0) {
+      for (const line of stdout.split('\n')) {
+        const [ts, id, model, input, output, read, write, w1h, w5m] = line.split('\t')
+        const at = ts ? Date.parse(ts) : NaN
+        if (!id || !Number.isFinite(at)) continue
+        const n = (x: string | undefined) => (x ? Number(x) : 0)
+        const split = w1h || w5m ? { ephemeral_1h_input_tokens: n(w1h), ephemeral_5m_input_tokens: n(w5m) } : null
+        replies.push({ at, id, model: model || undefined, usage: { input_tokens: n(input), output_tokens: n(output), cache_read_input_tokens: n(read), cache_creation_input_tokens: n(write), cache_creation: split } })
+      }
+      return replies
+    }
+  } catch {
+    // no awk here: read it whole below
+  }
+  let text: string
+  try {
+    text = String(await $.fs.read(file))
+  } catch {
+    return replies
+  }
+  for (const line of text.split('\n')) {
+    if (!line.includes('"usage"') || !line.includes('"assistant"')) continue
+    let row: { timestamp?: string; message?: { id?: string; model?: string; usage?: Usage } }
+    try {
+      row = JSON.parse(line)
+    } catch {
+      continue
+    }
+    const m = row.message
+    const at = row.timestamp ? Date.parse(row.timestamp) : NaN
+    if (m?.usage && m.id && Number.isFinite(at)) replies.push({ at, id: m.id, model: m.model, usage: m.usage })
+  }
+  return replies
+}
+
+async function transcripts($: EngineInterface, dir: string, since: number, depth = 0): Promise<string[]> {
+  let entries
+  try {
+    entries = await $.fs.list(dir)
+  } catch {
+    return []
+  }
+  const found: string[] = []
+  for (const e of entries) {
+    if (e.kind === 'file' && e.name.endsWith('.jsonl') && e.mtimeMs >= since) found.push(`${dir}/${e.name}`)
+    // a project's folders: its chats', which hold their subagents' transcripts
+    else if (e.kind === 'dir' && depth < 3) found.push(...(await transcripts($, `${dir}/${e.name}`, since, depth + 1)))
+  }
+  return found
+}
+
+async function backfillHistory($: EngineInterface): Promise<void> {
+  if (isBackfilling || ((await storeGet($, 'historyBackfill')) as number | undefined) === BACKFILL_VERSION) return
+  isBackfilling = true
+  try {
+    const now = await $.clock.now()
+    const saved = (await storeGet($, 'history')) as HistoryStore | undefined
+    const week = saved?.last
+    const resetsAt = week ? Date.parse(week.resetsAt) : NaN
+    // this week's % sets the scale: too little of it says nothing yet
+    if (!saved || !week || !Number.isFinite(resetsAt) || week.percent < 1) return
+    // read back once, whatever it finds: no records is no history to add
+    // a redo of v1's read-back: its days and past weeks are replaced, not kept
+    const isRedo = (await storeGet($, 'historyBackfilled')) === true
+    await storeSet($, 'historyBackfill', BACKFILL_VERSION)
+    const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))
+    const config = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? (home ? `${home}/.claude` : undefined)
+    if (!config) return
+    const since = now - BACKFILL_MS
+    const byDay: Record<string, number> = {}
+    const replies: { at: number; weight: number }[] = []
+    const seen = new Set<string>()
+    for (const file of await transcripts($, `${config}/projects`, since)) {
+      for (const r of await repliesIn($, file)) {
+        // a reply is written once per block, each with the same usage: counted once
+        if (seen.has(r.id) || r.at < since) continue
+        seen.add(r.id)
+        const weight = weigh(r.usage, r.model)
+        replies.push({ at: r.at, weight })
+        byDay[dayKey(r.at)] = (byDay[dayKey(r.at)] ?? 0) + weight
+      }
+    }
+    const weekMs = WINDOWS.seven_day!.ms
+    const thisWeek = replies.filter(r => r.at >= resetsAt - weekMs).reduce((sum, r) => sum + r.weight, 0)
+    if (thisWeek <= 0) return
+    const ratio = week.percent / thisWeek
+    const round = (p: number) => Math.min(100, Math.round(p * ratio * 10) / 10)
+    // merged into the history as it is now: a refresh may have counted a rise meanwhile;
+    // a day already counted live keeps the larger, the estimate covering all of it
+    Object.assign(saved, ((await storeGet($, 'history')) as HistoryStore | undefined) ?? {})
+    const oldest = dayKey(now - DAYS_KEPT * 24 * HOUR)
+    for (const [key, weight] of Object.entries(byDay)) {
+      if (key >= oldest) saved.days[key] = isRedo ? round(weight) : Math.max(saved.days[key] ?? 0, round(weight))
+    }
+    // the weeks before this one, each its own 7 days back from this week's start
+    const past: { resetsAt: number; peak: number }[] = []
+    for (let k = WEEKS_KEPT - 1; k >= 1; k--) {
+      const end = resetsAt - k * weekMs
+      if (!isRedo && saved.weeks.some(w => Math.abs(w.resetsAt - end) <= SAME_WINDOW_MS)) continue
+      const weight = replies.filter(r => r.at >= end - weekMs && r.at < end).reduce((sum, r) => sum + r.weight, 0)
+      if (weight > 0) past.push({ resetsAt: end, peak: round(weight) })
+    }
+    const kept = isRedo ? saved.weeks.filter(w => Math.abs(w.resetsAt - resetsAt) <= SAME_WINDOW_MS) : saved.weeks
+    saved.weeks = [...past, ...kept].sort((a, b) => a.resetsAt - b.resetsAt).slice(-WEEKS_KEPT)
+    await storeSet($, 'history', saved)
+    await refresh($)
+  } catch (error) {
+    $.ui.log(`usage-quota: the history could not be read back: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+  } finally {
+    isBackfilling = false
+  }
+}
+
+const shortDate = (t: number) => new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+// a day key read as that local day (Date.parse would read it as UTC midnight)
+const dayOf = (key: string) => {
+  const [y, m, d] = key.split('-').map(Number)
+  return new Date(y!, (m ?? 1) - 1, d ?? 1).getTime()
 }
 
 // The window is shown as three groups: Messages, Tools (System + MCP tools) and Other
@@ -960,6 +1219,7 @@ async function refresh($: EngineInterface, ask: Ask = 'no'): Promise<void> {
     ].filter(c => c.tokens > 0)
     const { limits, at: limitsAt, error: limitsError } = await limitsOf($, usage.rateLimits, now, ask)
     const pace = await trackPace($, limits, now)
+    const history = await trackHistory($, limits, now)
     const next: Snapshot = {
       window: context.window,
       tokens: used,
@@ -970,6 +1230,7 @@ async function refresh($: EngineInterface, ask: Ask = 'no'): Promise<void> {
       ...(limitsAt !== undefined ? { limitsAt } : {}),
       ...(limitsError ? { limitsError } : {}),
       ...(Object.keys(pace).length > 0 ? { pace } : {}),
+      ...(history.weeks.length > 0 ? { history } : {}),
       // the minute, so countdowns and ages redraw even when nothing else moves
       minute: Math.floor(now / 60_000),
     }
@@ -1008,6 +1269,8 @@ export const register: Register = on => {
     }
     await loadAuto($)
     await syncCollapsed($)
+    const by = await storeGet($, 'historyBy')
+    if (by === 'days' || by === 'weeks') await update($, historyBy, () => by)
     try {
       const auth = await $.session.authorize()
       cacheTtl = auth?.kind === 'bearer' ? CACHE_TTL_LOGIN : CACHE_TTL_KEY
@@ -1146,6 +1409,7 @@ export const register: Register = on => {
       </Box>
     )
     const collapsed = await read($, isCollapsed)
+    const showHistory = !collapsed && snap.history !== undefined && (await read($, isHistory))
     const auto = await read($, autoCompact)
     const ask = await read($, autoAsk)
     const tick = await read($, fieldTick)
@@ -1163,7 +1427,7 @@ export const register: Register = on => {
     // The header: the headline beside the controls when both fit, else the controls
     // on a row of their own beneath it
     // (the desktop's letters are narrower than its cells: about 0.8 of one)
-    const CONTROLS = 40
+    const CONTROLS = 50
     // the terminal draws its own hide control ([-]) over the band's top-right
     // corner: the first row keeps clear of it
     const HOST_HIDE = Svg ? 0 : 4
@@ -1235,7 +1499,11 @@ export const register: Register = on => {
             <Text color={CLEAR}>%</Text>
           </Box>
         ) : null}
-        <Box key="compactBox" marginLeft={isHeadBeside ? 2 : 0}>
+        <Box key="compactBox" marginLeft={isHeadBeside ? 2 : 0} flexDirection="row" columnGap={1}>
+          {/* the history in place of the limits and the context, and back */}
+          {!collapsed && snap.history ? (
+            <Button key="history" label={showHistory ? 'Usage' : 'History'} hover={{ backgroundColor: COMPACT_LIT }} onPress={() => void update($, isHistory, v => !v)} />
+          ) : null}
           <Button key="compact" label="Compact" hover={{ backgroundColor: COMPACT_LIT }} onPress={() => compactNow($)} />
         </Box>
         <Button
@@ -1469,6 +1737,97 @@ export const register: Register = on => {
       </Box>
     )
 
+    // the history, beneath the rest when expanded: what the weekly limit went to by day
+    // (the last 14) or by week (the last 8), the view a choice kept for every chat
+    const by = await read($, historyBy)
+    const hist = snap.history
+    const historyBlock = (() => {
+      if (!hist) return null
+      const bars = by === 'days' ? hist.days : hist.weeks
+      const last = bars[bars.length - 1]
+      const share = (p: number) => (p > 0 && p < 1 ? '<1%' : `${Math.round(p)}%`)
+      // the average from the first bar with anything in it, so days before the band
+      // was installed don't pull it down; weeks: the finished ones
+      const first = bars.findIndex(b => b.percent > 0)
+      const counted = by === 'days' ? (first < 0 ? [] : bars.slice(first)) : bars.slice(0, -1)
+      const avg = counted.length > 0 ? counted.reduce((sum, b) => sum + b.percent, 0) / counted.length : undefined
+      const summary =
+        by === 'days'
+          ? `${share(last?.percent ?? 0)} today${avg !== undefined ? ` – ${share(avg)} a day on average` : ''}`
+          : `${share(last?.percent ?? 0)} this week${avg !== undefined ? ` – ${share(avg)} a week on average` : ''}`
+      const choose = (view: 'days' | 'weeks') => async () => {
+        await storeSet($, 'historyBy', view)
+        await update($, historyBy, () => view)
+      }
+      const tab = (value: 'days' | 'weeks', label: string) =>
+        by === value ? <Text bold>{label}</Text> : <Button key={`history-${value}`} label={label} plain dimColor onPress={choose(value)} />
+      const span = !bars[0]
+        ? ''
+        : by === 'days'
+          ? `${shortDate(dayOf(bars[0].key))} to today`
+          : `the week of ${shortDate(Date.parse(bars[0].key) - WINDOWS.seven_day!.ms)} to this week`
+      const max = Math.max(1, ...bars.map(b => b.percent))
+      const color = PALETTE[1]!
+      const lead = PALETTE[0]!
+      // under each bar its day's initial, or its week's start (10/23); the last in bold
+      const labelOf = (b: HistoryBar) => {
+        const t = by === 'days' ? dayOf(b.key) : Date.parse(b.key) - WINDOWS.seven_day!.ms
+        return by === 'days'
+          ? new Date(t).toLocaleDateString('en-US', { weekday: 'narrow' })
+          : new Date(t).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })
+      }
+      // one column a bar, its label beneath it: on the desktop the width shared out, on
+      // the terminal just wide enough for a week's date
+      const COL = Svg ? Math.max(by === 'days' ? 2 : 5, Math.floor(width / Math.max(1, bars.length))) : by === 'days' ? 3 : 6
+      const chartWidth = bars.length * COL
+      // beneath the bars, each one's % (a narrow column drops the sign), then its day
+      const valueOf = (b: HistoryBar) => (b.percent <= 0 ? '' : COL >= 4 ? share(b.percent) : b.percent < 1 ? '<1' : `${Math.round(b.percent)}`)
+      const row = (text: (b: HistoryBar) => string, isMuted: boolean) => (
+        <Box flexDirection="row" width={chartWidth}>
+          {bars.map((b, i) => (
+            <Box width={COL} flexShrink={0} justifyContent={Svg ? 'center' : 'flex-start'}>
+              <Text bold={i === bars.length - 1} color={i === bars.length - 1 ? lead : isMuted ? MUTED : undefined} wrap="truncate-end">{text(b)}</Text>
+            </Box>
+          ))}
+        </Box>
+      )
+      const labels = (
+        <Box flexDirection="column">
+          {row(valueOf, false)}
+          {row(labelOf, true)}
+        </Box>
+      )
+      return (
+        <Box flexDirection="column">
+          <Box flexDirection="row" justifyContent="space-between" columnGap={2} flexWrap="wrap">
+            <Box flexDirection="row" columnGap={1} alignItems="center" flexShrink={0}>
+              <Text bold>History</Text>
+              <Box marginLeft={1}>{tab('days', 'Days')}</Box>
+              <Text color={MUTED}>/</Text>
+              {tab('weeks', 'Weeks')}
+            </Box>
+            <Text color={MUTED} wrap="wrap">{`${summary} – highest ${share(max)}`}</Text>
+          </Box>
+          {Svg ? (
+            <Box width={chartWidth} height={3} alignItems="flex-end">
+              <Svg alt={`History: weekly limit used by ${by === 'days' ? 'day' : 'week'}, ${span}: ${bars.map(b => share(b.percent)).join(', ')}`} source={chartSvg(bars, color, lead)} height={CHART_PX} />
+            </Box>
+          ) : (
+            ([2, 1, 0] as const).map(level => (
+              <Box flexDirection="row">
+                {bars.map((b, i) => (
+                  <Box width={COL} flexShrink={0}>
+                    <Text color={i === bars.length - 1 ? lead : b.percent > 0 ? color : TRACK}>{blockOf(b.percent, max, level)}</Text>
+                  </Box>
+                ))}
+              </Box>
+            ))
+          )}
+          {labels}
+        </Box>
+      )
+    })()
+
     return (
       <Box flexDirection="column">
         {isHeadBeside ? (
@@ -1499,6 +1858,8 @@ export const register: Register = on => {
 
         {collapsed ? (
           collapsedBlock
+        ) : showHistory ? (
+          historyBlock
         ) : isSplit ? (
           <Box flexDirection="row" columnGap={4}>
             {limitsBlock}

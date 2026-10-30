@@ -130,8 +130,8 @@ test('draws the band on track', async ($, on) => {
     }
     if (surface === 'desktop') {
       // thin Svg bars: the context bar and the two rate bars, no flexGrow segments
-      // (the auto compact switch is an Svg too: left out here)
-      const svgs = (await ui.findAll({ type: 'Svg' })).filter(svg => !/^Auto compact/.test(String(svg.props.alt)))
+      // (the auto compact switch and the history chart are Svgs too: left out here)
+      const svgs = (await ui.findAll({ type: 'Svg' })).filter(svg => !/^Auto compact|^History/.test(String(svg.props.alt)))
       // the two rate bars (left, each with a forecast tick), then the context bar (right)
       expect(svgs).toHaveLength(3)
       expect(svgs[0]?.props.alt).toMatch(/^5 Hour/)
@@ -884,7 +884,8 @@ test('the settings saved under the old plugin name are copied over once, never o
   await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
   await clock.advance(3_000)
   // the host gives the path in the platform's own form
-  expect(listed).toEqual([expect.stringMatching(/home[\\/]me[\\/]\.claude[\\/]plugins[\\/]store$/)])
+  // (the history's read-back of the chats' records lists other folders)
+  expect(listed.filter(path => /plugins/.test(path))).toEqual([expect.stringMatching(/home[\\/]me[\\/]\.claude[\\/]plugins[\\/]store$/)])
   const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
   expect(await ui.find({ type: 'Svg', alt: 'Auto compact on' })).toBeDefined()
   expect((await ui.find({ type: 'Input' }))?.props.value).toBe('40')
@@ -1082,5 +1083,143 @@ test('the cache: a WARM pill with its minutes left after a reply, amber near the
   for await (const _ of $.turn.step({ turnId: 't2', index: 0, model: 'claude', messageCount: 3 })) void _
   ui = await draw()
   expect((await pill(ui))?.props.alt).toBe('Cache warm')
+  await ui.unmount()
+})
+
+test('the history adds each rise of the weekly % to its day, once, and keeps each week\'s peak', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.store(on)
+  const week = { percentUsed: 10, resetsAt: iso(3 * 24 * HOUR) }
+  on('session.usage', () => ({ value: usage([{ kind: 'seven_day', ...week }]) }))
+  answerRest(on, [])
+  const draw = (surface: (typeof SURFACES)[number] = 'desktop') =>
+    $.ui.mount({ plugin: 'usage-quota', surface, component: 'AbovePrompt', props: PROPS })
+  const chart = async (ui: Awaited<ReturnType<typeof draw>>) =>
+    String((await ui.findAll({ type: 'Svg' })).find(svg => /^History/.test(String(svg.props.alt)))?.props.alt)
+
+  // the first reading only sets the start: the week before it is no one day's
+  await $.session.measure(MEASURE)
+  let ui = await draw()
+  // the History button shows it in place of the limits and the context, Usage goes back
+  expect(await ui.find({ type: 'Text', text: 'History' })).toBeUndefined()
+  await ui.press({ key: 'history' })
+  expect(await ui.find({ type: 'Text', text: '0% today' })).toBeDefined()
+  expect(await ui.find({ text: '5 Hour' })).toBeUndefined()
+  expect((await ui.findAll({ type: 'Button' })).some(b => b.props.label === 'Usage')).toBe(true)
+  await ui.press({ key: 'history' })
+  expect(await ui.find({ text: '5 Hour' })).toBeDefined()
+  await ui.press({ key: 'history' })
+  await ui.unmount()
+
+  // up 4 today; read twice, counted once
+  week.percentUsed = 14
+  await clock.advance(MIN)
+  await $.session.measure(MEASURE)
+  await clock.advance(MIN)
+  await $.session.measure(MEASURE)
+  // the next day, up 6, then the week resets and the new one is at 3
+  await clock.advance(24 * HOUR)
+  week.percentUsed = 20
+  await $.session.measure(MEASURE)
+  await clock.advance(MIN)
+  Object.assign(week, { percentUsed: 3, resetsAt: iso(8 * 24 * HOUR) })
+  await $.session.measure(MEASURE)
+
+  ui = await draw()
+  // yesterday 4, today 6 + 3; the average from the first day with any
+  expect(await ui.find({ type: 'Text', text: '9% today – 7% a day on average' })).toBeDefined()
+  expect(await chart(ui)).toMatch(/by day, \w+ \d+ to today: (0%, ){12}4%, 9%$/)
+  // the highest day named; under each bar its day's initial, today's in bold
+  expect(await ui.find({ type: 'Text', text: '9% today – 7% a day on average – highest 9%' })).toBeDefined()
+  const initials = (await ui.findAll({ type: 'Text' })).filter(t => /^[SMTWF]$/.test(String(t.text)))
+  expect(initials).toHaveLength(14)
+  expect(initials[13]?.props.bold).toBe(true)
+  // and above each initial its %, an empty day blank
+  const values = (await ui.findAll({ type: 'Text' })).filter(t => /^\d+%$/.test(String(t.text)))
+  expect(values.map(t => t.text).slice(-2)).toEqual(['4%', '9%'])
+
+  // by week: each window's peak, this week's 3%, the finished one's 20%
+  await ui.press({ key: 'history-weeks' })
+  expect(await ui.find({ type: 'Text', text: '3% this week – 20% a week on average' })).toBeDefined()
+  expect(await chart(ui)).toMatch(/by week, the week of \w+ \d+ to this week: 20%, 3%$/)
+  await ui.unmount()
+
+  // the choice is kept; the terminal draws block bars
+  ui = await draw('terminal')
+  expect(await ui.find({ type: 'Text', text: '3% this week – 20% a week on average' })).toBeDefined()
+  // three rows of blocks, the highest week full in each; under each its week's start
+  expect((await ui.findAll({ type: 'Text', text: '█' })).length).toBe(3)
+  expect(await ui.find({ type: 'Text', text: '9/30' })).toBeDefined()
+  // collapsed, no history and no button for it
+  await ui.press({ key: 'collapse' })
+  expect(await ui.find({ type: 'Text', text: 'History' })).toBeUndefined()
+  expect((await ui.findAll({ type: 'Button' })).some(b => b.props.label === 'History')).toBe(false)
+  await ui.press({ key: 'collapse' })
+  await ui.unmount()
+})
+
+test('the days and weeks before the band are read back once from the chats\' records', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.store(on)
+  on('session.usage', () => ({ value: usage([{ kind: 'seven_day', percentUsed: 10, resetsAt: iso(3 * 24 * HOUR) }]) }))
+  answerRest(on, [])
+  on('env.get', (_$, e) => ({ value: (e as unknown as { name: string }).name === 'HOME' ? '/home/me' : undefined }) as never)
+  const listed: string[] = []
+  on('fs.list', (_$, e) => {
+    const path = String((e as unknown as { path: string }).path)
+    listed.push(path)
+    const entries = /projects$/.test(path)
+      ? [{ name: 'proj', kind: 'dir' }]
+      : /proj$/.test(path)
+        ? [{ name: 'chat.jsonl', kind: 'file' }, { name: 'old.jsonl', kind: 'file', mtimeMs: NOW - 90 * 24 * HOUR }]
+        : []
+    return { value: entries.map(x => ({ size: 1, mtimeMs: NOW, isLink: false, ...x })) } as never
+  })
+  // Haiku input alone weighs 1 a token: this week 600 today and 400 two days back, so
+  // 10% is 1000 and 1% is 100; 500 ten days back, in the week before. A reply written
+  // twice (one row per block) counts once; a user row and a broken line are skipped
+  const reply = (id: string, ago: number, input: number) =>
+    JSON.stringify({ type: 'assistant', timestamp: iso(-ago), message: { id, model: 'claude-haiku-5-5', usage: { input_tokens: input, output_tokens: 0 } } })
+  const rows = [reply('a', MIN, 600), reply('a', MIN, 600), reply('b', 2 * 24 * HOUR, 400), reply('c', 10 * 24 * HOUR, 500), '{"type":"user","usage"', 'not json "usage" "assistant"']
+  const read: string[] = []
+  on('fs.read', (_$, e) => {
+    read.push(String((e as unknown as { path: string }).path))
+    return { value: rows.join('\n') } as never
+  })
+
+  await $.session.measure(MEASURE)
+  await clock.advance(100)
+  await $.session.measure(MEASURE)
+  await clock.advance(100)
+  // the old file is not opened, and it is all read once
+  expect(read).toHaveLength(1)
+  expect(read[0]).toMatch(/projects[\\/]proj[\\/]chat\.jsonl$/)
+
+  const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
+  await ui.press({ key: 'history' })
+  const chart = async () => String((await ui.findAll({ type: 'Svg' })).find(svg => /^History/.test(String(svg.props.alt)))?.props.alt)
+  expect(await ui.find({ type: 'Text', text: '6% today – 1% a day on average' })).toBeDefined()
+  expect(await chart()).toMatch(/: 0%, 0%, 0%, 5%, (0%, ){7}4%, 0%, 6%$/)
+  await ui.press({ key: 'history-weeks' })
+  expect(await ui.find({ type: 'Text', text: '10% this week – 5% a week on average' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a usage check that never reached the service says so in a few words', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  mock.store(on)
+  on('session.usage', () => ({ value: usage([]) }))
+  on('session.authorize', () => ({ value: { handle: 'h', kind: 'bearer' } }))
+  // the lookup fails beneath: the call rejects with the host's own words
+  on('http.fetch', () => ({ deny: 'ENOTFOUND: getaddrinfo ENOTFOUND api.anthropic.com' }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', () => ({ value: { command: 'quota' } }))
+  on('session.measure', () => ({ changed: [] }))
+  on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as never)
+  on('ui.status', () => ({ value: undefined }))
+  await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: 'usage check failed (no network)' })).toBeDefined()
+  expect(await ui.find({ text: /ENOTFOUND/ })).toBeUndefined()
   await ui.unmount()
 })

@@ -16,7 +16,13 @@ export type Snapshot = {
   pace?: Record<string, PaceOf>
   /** the minute it was taken in: redraws countdowns at least once a minute */
   minute?: number
+  /** what the weekly limit went to, day by day and week by week, oldest first */
+  history?: History
 }
+
+/** a day (YYYY-MM-DD, local) or a week (when it reset) and the % of the weekly limit it took */
+export type HistoryBar = { key: string; percent: number }
+export type History = { days: HistoryBar[]; weeks: HistoryBar[] }
 
 /** auto compact: on or off, and the context % that sets it off (kept for every chat) */
 export type AutoCompact = { isOn: boolean; at: number | null }
@@ -44,6 +50,10 @@ declare module 'claude-code' {
       theme: 'dark' | 'light'
       /** the prompt cache as this chat's last reply left it; null before any reply */
       cache: Cache | null
+      /** the history chart: by day or by week */
+      historyBy: 'days' | 'weeks'
+      /** the band shows the history in place of the limits and the context */
+      isHistory: boolean
     }
   }
 }
