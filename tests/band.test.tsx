@@ -1223,3 +1223,55 @@ test('a usage check that never reached the service says so in a few words', asyn
   expect(await ui.find({ text: /ENOTFOUND/ })).toBeUndefined()
   await ui.unmount()
 })
+
+test('a cold cache with a long context says to compact first; Compact now compacts, Not now waits for the next cold spell', async ($, on) => {
+  const ran: string[] = []
+  const percent = { value: 16 }
+  const clock = startWorld(on, percent, ran)
+  on('turn.step', async function* (_$, e) {
+    return {
+      turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn',
+      usage: { model: 'claude', input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 150_000, cache_creation_input_tokens: 10_000 },
+    }
+  })
+  await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
+  const step = async (turnId: string) => {
+    for await (const _ of $.turn.step({ turnId, index: 0, model: 'claude', messageCount: 1 })) void _
+  }
+  const hint = /^Cache cold: your next reply sends all 160k again\./
+
+  await step('t1')
+  let ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
+  // warm: nothing to say
+  expect(await ui.find({ type: 'Text', text: hint })).toBeUndefined()
+  await ui.unmount()
+
+  // cold (5 minutes on an API key) with 160k in the context: the hint, in amber
+  await clock.advance(6 * MIN)
+  ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
+  expect((await ui.find({ type: 'Text', text: hint }))?.props.color).toBe('#fbbf24')
+  await ui.press({ key: 'coldCompact' })
+  await clock.advance(1_000)
+  expect(ran).toContain('compact')
+  // put off: gone, and still gone on the next draw
+  await ui.press({ key: 'coldLater' })
+  expect(await ui.find({ type: 'Text', text: hint })).toBeUndefined()
+  await ui.unmount()
+  ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: hint })).toBeUndefined()
+  await ui.unmount()
+
+  // a reply warms it, the cache cools again: it is back
+  await step('t2')
+  await clock.advance(6 * MIN)
+  ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: hint })).toBeDefined()
+  await ui.unmount()
+
+  // a short context is not worth it
+  percent.value = 5
+  await clock.advance(3_000)
+  ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: /^Cache cold/ })).toBeUndefined()
+  await ui.unmount()
+})

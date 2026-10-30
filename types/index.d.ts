@@ -54,6 +54,8 @@ declare module 'claude-code' {
       historyBy: 'days' | 'weeks'
       /** the band shows the history in place of the limits and the context */
       isHistory: boolean
+      /** the cold cache whose compact hint was put off (its last reply's time): shown again once it warms and cools anew */
+      coldHintOff: number | null
     }
   }
 }

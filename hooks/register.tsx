@@ -18,6 +18,7 @@ const hold = atom({ plugin: 'usage-quota', key: 'hold' } as const, { chat: '', w
 const cache = atom({ plugin: 'usage-quota', key: 'cache' } as const, null as Cache | null)
 const historyBy = atom({ plugin: 'usage-quota', key: 'historyBy' } as const, 'days' as 'days' | 'weeks')
 const isHistory = atom({ plugin: 'usage-quota', key: 'isHistory' } as const, false)
+const coldHintOff = atom({ plugin: 'usage-quota', key: 'coldHintOff' } as const, null as number | null)
 
 // two palettes, the desktop's dark and light themes; the band draws in the one the
 // app shows (Theme), set at the start of every draw so all colours below follow it
@@ -223,6 +224,12 @@ function pillSvg(label: string, color: string): string {
     `font-family="-apple-system, system-ui, sans-serif" font-size="9.5" font-weight="700" letter-spacing="0.6">${label}</text></svg>`
   )
 }
+
+// A cold cache and a long context: the next reply sends all of it again at the full
+// price, and so does every reply after it until the cache is warm. Compacting first
+// sends it once more too (to summarise it), but every reply after that is light: worth
+// saying from this many tokens on
+const COLD_COMPACT_MIN_TOKENS = 100_000
 
 async function saveCache($: EngineInterface, next: Cache | null): Promise<void> {
   await update($, cache, () => next)
@@ -1729,6 +1736,21 @@ export const register: Register = on => {
       })()
     )
 
+    // the cold cache's hint, unless an ask already holds the line or it was put off
+    const offFor = await read($, coldHintOff)
+    const coldHint = cached && cacheState?.label === 'COLD' && snap.tokens >= COLD_COMPACT_MIN_TOKENS && !ask && offFor !== cached.at
+      ? `Cache cold: your next reply sends all ${tokens(snap.tokens)} again. Compact first to keep the replies after it light.`
+      : undefined
+    const COLD_LABELS = ['Compact now', 'Not now']
+    const isColdLine = width >= ((coldHint?.length ?? 0) + COLD_LABELS.join('').length) * (Svg ? 0.8 : 1) + COLD_LABELS.length * (Svg ? 3 : 4) + 3
+    const coldText = coldHint ? <Text color={AMBER} wrap="wrap">{coldHint}</Text> : null
+    const coldButtons = (
+      <Box flexDirection="row" columnGap={1} flexWrap="wrap" flexShrink={0}>
+        <Button key="coldCompact" label="Compact now" onPress={() => compactNow($)} />
+        <Button key="coldLater" label="Not now" plain dimColor onPress={() => void update($, coldHintOff, () => cached?.at ?? null)} />
+      </Box>
+    )
+
     const askText = ask ? <Text color={AMBER} wrap="wrap">{`Context is already at ${ask.percent}%, past ${ask.at}%. Auto compact:`}</Text> : null
     const askButtons = (
       <Box flexDirection="row" columnGap={1} flexWrap="wrap" flexShrink={0}>
@@ -1852,6 +1874,20 @@ export const register: Register = on => {
             <Box flexDirection="column" marginBottom={gap}>
               {askText}
               <Box marginTop={gap}>{askButtons}</Box>
+            </Box>
+          )
+        ) : null}
+
+        {coldHint ? (
+          isColdLine ? (
+            <Box flexDirection="row" alignItems="center" columnGap={1} marginBottom={gap}>
+              <Box flexShrink={1}>{coldText}</Box>
+              {coldButtons}
+            </Box>
+          ) : (
+            <Box flexDirection="column" marginBottom={gap}>
+              {coldText}
+              <Box marginTop={gap}>{coldButtons}</Box>
             </Box>
           )
         ) : null}
