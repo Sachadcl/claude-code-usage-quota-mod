@@ -36,7 +36,7 @@ const DARK: Palette = {
     'Custom agents': '#34d399', 'Memory files': '#fbbf24', Skills: '#fb923c', Messages: '#22d3ee',
   },
   switchOff: '#4b5163', switchOn: '#4ade80', switchLit: '#8b919c', compactLit: '#5a606e',
-  warm: '#e57b74', cold: '#7fb4d1', pillInk: '#1b1d24',
+  warm: '#4ade80', cold: '#94a3b8', pillInk: '#1b1d24',
 }
 // light: the same hues, deep enough to read on the pale band; the tracks pale
 const LIGHT: Palette = {
@@ -48,7 +48,7 @@ const LIGHT: Palette = {
     'Custom agents': '#10b981', 'Memory files': '#f59e0b', Skills: '#f97316', Messages: '#0ea5e9',
   },
   switchOff: '#b4b9c4', switchOn: '#22c55e', switchLit: '#c3c7cf', compactLit: '#d6d9df',
-  warm: '#d4544b', cold: '#3d86b8', pillInk: '#ffffff',
+  warm: '#22b856', cold: '#64748b', pillInk: '#ffffff',
 }
 let MUTED = DARK.muted
 let GREEN = DARK.green
@@ -66,7 +66,8 @@ let SWITCH_ON = DARK.switchOn
 let SWITCH_LIT = DARK.switchLit
 // Compact's hover: clearly lighter than its resting chrome, its label still reads
 let COMPACT_LIT = DARK.compactLit
-// the cache's pill: a warm red while the cache holds, a cold blue once it lapsed
+// the cache's pill by what it means: green while the cache holds (replies are cheap),
+// amber near its end, slate once it lapsed (the next reply pays in full)
 let WARM = DARK.warm
 let COLD = DARK.cold
 let PILL_INK = DARK.pillInk
@@ -182,14 +183,11 @@ function headline(list: Forecast[], now: number): { text: string; color: string 
   }
   const out = list.filter(f => f.status === 'out').sort((a, b) => a.runOutAt - b.runOutAt)[0]
   if (out) {
-    return { text: `At this pace you'll run out before ${resetName(out.resetsAt, now)}.`, color: out.color }
+    return { text: `You'll run out before ${resetName(out.resetsAt, now)} at this pace.`, color: out.color }
   }
   const lead = list.find(f => f.kind === 'seven_day' && f.status !== 'idle') ?? list.find(f => f.status !== 'idle')
   if (!lead) return null
-  return {
-    text: `On track. You should reach ${resetName(lead.resetsAt, now)} with room to spare.`,
-    color: GREEN,
-  }
+  return { text: `On track for ${resetName(lead.resetsAt, now)}.`, color: GREEN }
 }
 
 // The prompt cache: every reply leaves the chat's context cached for a while, and the
@@ -1412,7 +1410,7 @@ export const register: Register = on => {
             <Text bold color={PILL_INK}>{` ${look.label} `}</Text>
           </Box>
         )}
-        <Text bold color={look.color}>{look.short}</Text>
+        <Text color={look.color === WARM ? ink(GREEN) : look.color}>{look.short}</Text>
       </Box>
     )
     const collapsed = await read($, isCollapsed)
@@ -1443,12 +1441,10 @@ export const register: Register = on => {
     // the windows and the context side by side, or one above the other
     const isSplit = width >= 84
     const column = isSplit ? Math.floor((width - 4) / 2) : width
-    // the limit bars fill their column: less the label (8) and the % (2 + 4)
+    // the bars fill their column: less the name (8) and the % slot (6)
     const cells = Math.max(6, column - 14)
     // collapsed: the three bars in one row, or each on a row of its own
     const isOneRow = width >= 72
-    // the context's two figures on one line, or the free count on the next
-    const isContextLine = column >= 38
     // the question and its two answers on one line when they fit, else the answers
     // beneath: measured from the words themselves (the desktop draws text narrower than
     // a cell each, as the headline's check allows), each button's chrome and the gaps
@@ -1506,12 +1502,13 @@ export const register: Register = on => {
             <Text color={CLEAR}>%</Text>
           </Box>
         ) : null}
-        <Box key="compactBox" marginLeft={isHeadBeside ? 2 : 0} flexDirection="row" columnGap={1}>
+        <Box key="compactBox" flexDirection="row" alignItems="center" columnGap={1}>
           {/* the history in place of the limits and the context, and back */}
           {!collapsed && snap.history ? (
-            <Button key="history" label={showHistory ? 'Usage' : 'History'} hover={{ backgroundColor: COMPACT_LIT }} onPress={() => void update($, isHistory, v => !v)} />
+            <Button key="history" label={showHistory ? 'Usage' : 'History'} plain hover={{ backgroundColor: COMPACT_LIT }} onPress={() => void update($, isHistory, v => !v)} />
           ) : null}
-          <Button key="compact" label="Compact" hover={{ backgroundColor: COMPACT_LIT }} onPress={() => compactNow($)} />
+          {!collapsed && snap.history ? <Text color={MUTED}>·</Text> : null}
+          <Button key="compact" label="Compact" plain hover={{ backgroundColor: COMPACT_LIT }} onPress={() => compactNow($)} />
         </Box>
         <Button
           key="collapse"
@@ -1575,11 +1572,18 @@ export const register: Register = on => {
         return runs
       }, [])
 
+    // a bar's %, right-aligned in a slot of its own so the column lines up; bold only
+    // when it is something to look at (amber, red)
+    const percentSlot = (percent: number, color: string) => (
+      <Box width={6} flexShrink={0} justifyContent="flex-end">
+        <Text bold={color !== GREEN} color={ink(color)}>{`${Math.round(percent)}%`}</Text>
+      </Box>
+    )
     const limitsBlock = (
       <Box flexDirection="column" width={isSplit ? '50%' : undefined}>
         {limits.length === 0 ? <Text color={MUTED} wrap="wrap">Usage limits show after the first reply.</Text> : null}
         {stale ? <Text color={AMBER} wrap="wrap">{stale}</Text> : null}
-        {limits.map((f, i) => {
+        {limits.map(f => {
           // held together when the note wraps: "resets in 2d 20h" moves down whole,
           // never leaving "20h" alone on the next line
           const left = `resets in ${duration(f.resetsAt - now)}`.replace(/ /g, NB)
@@ -1587,10 +1591,10 @@ export const register: Register = on => {
             f.status === 'idle'
               ? 'starts with your next message'
               : f.status === 'out'
-                ? `Limit will hit in ${duration(f.runOutAt - now)} – ${left}`
+                ? `Runs out in ${duration(f.runOutAt - now)} – ${left}`
                 : f.status === 'hit'
                   ? `Limit reached – ${left}`
-                  : `On pace for about ${Math.round(Math.min(100, f.projected))}% by reset – ${left}`
+                  : `About ${Math.round(Math.min(100, f.projected))}% at reset – ${left}`
           return (
             <Box flexDirection="column">
               <Box flexDirection="row">
@@ -1598,42 +1602,26 @@ export const register: Register = on => {
                   <Text bold wrap="truncate-end">{f.label}</Text>
                 </Box>
                 {bar(`${f.label} ${Math.round(f.percent)}% used`, limitSegments(f), cells, markerOf(f), f)}
-                <Box marginLeft={2} flexShrink={0}>
-                  <Text bold color={ink(f.color)}>{`${Math.round(f.percent)}%`}</Text>
-                </Box>
+                {percentSlot(f.percent, f.color)}
               </Box>
               <Text color={MUTED} wrap="wrap">{note}</Text>
-              {/* a whole blank line, not a margin: the desktop draws margins shorter
-                  than a line, which put Weekly out of step with the right column */}
-              {i < limits.length - 1 ? <Text> </Text> : null}
             </Box>
           )
         })}
       </Box>
     )
 
-    const usedText = <Text bold color={ink(fillColor(snap.percent))}>{`${Math.round(snap.percent)}% used`}</Text>
     const freeText = <Text color={MUTED}>{`${tokens(free)} free of ${tokens(snap.window)}`}</Text>
-    const contextName = (
-      <Box flexDirection="row">
-        <Text bold>Context</Text>
-        <Box marginLeft={2}>{usedText}</Box>
-      </Box>
-    )
     const contextBlock = (
       <Box flexDirection="column" width={isSplit ? '50%' : undefined}>
-        {bar(`Context ${Math.round(snap.percent)}% used`, contextSegments, column)}
-        {isContextLine ? (
-          <Box flexDirection="row" justifyContent="space-between" columnGap={2}>
-            {contextName}
-            {freeText}
+        <Box flexDirection="row">
+          <Box width={8} flexShrink={0}>
+            <Text bold wrap="truncate-end">Context</Text>
           </Box>
-        ) : (
-          <Box flexDirection="column">
-            {contextName}
-            {freeText}
-          </Box>
-        )}
+          {bar(`Context ${Math.round(snap.percent)}% used`, contextSegments, cells)}
+          {percentSlot(snap.percent, fillColor(snap.percent))}
+        </Box>
+        {freeText}
         {(['Messages', 'Tools', 'Other'] as const)
           .map(name => shown.find(c => c.name === name))
           .filter((c): c is (typeof shown)[number] => c !== undefined)
@@ -1707,7 +1695,7 @@ export const register: Register = on => {
                 bar(`${item.label} ${Math.round(item.percent)}% used`, item.segments, isContext ? contextBar : limitBar, item.marker, item.f)
               )}
               <Box marginLeft={1} flexShrink={0} flexGrow={isContext && !Svg ? 1 : 0} justifyContent={isContext ? 'flex-end' : undefined}>
-                <Text bold color={ink(item.color)}>{pct}</Text>
+                <Text bold={item.color !== GREEN} color={ink(item.color)}>{pct}</Text>
               </Box>
             </Box>
           )
@@ -1727,7 +1715,7 @@ export const register: Register = on => {
                 </Box>
                 {bar(`${item.label} ${Math.round(item.percent)}% used`, item.segments, Math.max(6, width - nameCells - 6), item.marker, item.f)}
                 <Box marginLeft={2} flexShrink={0}>
-                  <Text bold color={ink(item.color)}>{`${Math.round(item.percent)}%`}</Text>
+                  <Text bold={item.color !== GREEN} color={ink(item.color)}>{`${Math.round(item.percent)}%`}</Text>
                 </Box>
               </Box>
             ))}

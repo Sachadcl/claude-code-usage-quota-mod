@@ -94,8 +94,9 @@ test('draws the band on track', async ($, on) => {
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'usage-quota', surface, component: 'AbovePrompt', props: PROPS })
-    expect(await ui.find({ text: /^On track\. You should reach Wednesday's reset with room to spare\.$/ })).toBeDefined()
-    expect(await ui.find({ text: '16% used' })).toBeDefined()
+    expect(await ui.find({ text: /^On track for Wednesday's reset\.$/ })).toBeDefined()
+    // Context reads as the limits do: name, bar, % on one row, the counts beneath
+    expect(await ui.find({ type: 'Text', text: '16%' })).toBeDefined()
     expect(await ui.find({ text: '809k free of 1M' })).toBeDefined()
     expect(await ui.find({ text: 'Messages' })).toBeDefined()
     expect(await ui.find({ text: '96k' })).toBeDefined()
@@ -111,9 +112,8 @@ test('draws the band on track', async ($, on) => {
     expect(await ui.find({ text: 'Deferred tools' })).toBeUndefined()
     expect(await ui.find({ text: '5 Hour' })).toBeDefined()
     expect(await ui.find({ text: 'Weekly' })).toBeDefined()
-    expect(await ui.find({ text: 'On pace for about 81% by reset – resets in 3d 7h' })).toBeDefined()
-    expect(await ui.find({ text: 'On pace for about 32% by reset – resets in 3h 24m' })).toBeDefined()
-    expect(await ui.find({ text: /·/ })).toBeUndefined()
+    expect(await ui.find({ text: 'About 81% at reset – resets in 3d 7h' })).toBeDefined()
+    expect(await ui.find({ text: 'About 32% at reset – resets in 3h 24m' })).toBeDefined()
     // legend runs highest first
     const names = (await ui.findAll({ type: 'Text' })).map(t => t.text)
     const order = ['Messages', 'Tools', 'Other'].map(n => names.indexOf(n))
@@ -161,11 +161,11 @@ test('leads with a window that will run out', async ($, on) => {
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'usage-quota', surface, component: 'AbovePrompt', props: PROPS })
-    const head = await ui.find({ type: 'Text', text: /^At this pace you'll run out before the .* reset\.$/ })
+    const head = await ui.find({ type: 'Text', text: /^You'll run out before the .* reset at this pace\.$/ })
     expect(head?.props.color).toBe('#f87171')
     // 60% in 1h, blended with the usual pace (50% a window): 40% more takes 74m,
     // 2h 46m before the reset
-    expect(await ui.find({ text: 'Limit will hit in 1h 14m – resets in 4h' })).toBeDefined()
+    expect(await ui.find({ text: 'Runs out in 1h 14m – resets in 4h' })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -187,7 +187,7 @@ test('treats the first 3% of a window as on track', async ($, on) => {
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'usage-quota', surface, component: 'AbovePrompt', props: PROPS })
-    expect(await ui.find({ text: /^On track\./ })).toBeDefined()
+    expect(await ui.find({ text: /^On track/ })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -244,7 +244,7 @@ test('a fresh session shows the last saved limits until its first reply', async 
     expect(await ui.find({ text: '5 Hour' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '0%' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'starts with your next message' })).toBeDefined()
-    expect(await ui.find({ text: /^On track\./ })).toBeDefined()
+    expect(await ui.find({ text: /^On track/ })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -538,7 +538,7 @@ test('the arrow collapses the band to one row of three bars, and back', async ($
     expect(await ui.find({ type: 'Button', label: '▼' })).toBeDefined()
     await ui.press({ key: 'collapse' })
     // the headline and Compact stay; the notes and categories go
-    expect(await ui.find({ text: /^On track\./ })).toBeDefined()
+    expect(await ui.find({ text: /^On track/ })).toBeDefined()
     expect(await ui.find({ type: 'Button', label: 'Compact' })).toBeDefined()
     expect(await ui.find({ type: 'Button', label: '▲' })).toBeDefined()
     // the limits by short name, each with the time to its reset, in grey
@@ -836,11 +836,11 @@ test('a narrow chat stacks the band and wraps its text, nothing cut off or dropp
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'usage-quota', surface, component: 'AbovePrompt', props: { ...PROPS, bodyColumns: 38 } })
     // the headline wraps, never truncated
-    const head = await ui.find({ type: 'Text', text: /^On track\./ })
+    const head = await ui.find({ type: 'Text', text: /^On track/ })
     expect(head?.props.wrap).toBe('wrap')
     for (const text of ['5 Hour', 'Weekly', 'Context', 'Messages', 'Tools', 'Other']) expect(await ui.find({ text })).toBeDefined()
     expect(await ui.find({ type: 'Button', label: 'Compact' })).toBeDefined()
-    expect((await ui.find({ type: 'Text', text: /^On pace for about/ }))?.props.wrap).toBe('wrap')
+    expect((await ui.find({ type: 'Text', text: /^About \d+% at reset/ }))?.props.wrap).toBe('wrap')
     await ui.press({ key: 'collapse' })
     for (const text of ['5H', 'W', 'Context']) expect(await ui.find({ text })).toBeDefined()
     await ui.press({ key: 'collapse' })
@@ -860,7 +860,7 @@ test('the desktop in light mode draws in the light palette', async ($, on) => {
   await clock.advance(2_000)
   const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
   // green text a shade deeper than the green bars, to read on the pale band
-  expect((await ui.find({ type: 'Text', text: /^On track\./ }))?.props.color).toBe('#16a34a')
+  expect((await ui.find({ type: 'Text', text: /^On track/ }))?.props.color).toBe('#16a34a')
   const weeklyBar = (await ui.findAll({ type: 'Svg' })).find(svg => /^Weekly/.test(String(svg.props.alt)))
   expect(String(weeklyBar?.props.source)).toContain('fill="#22b856"')
   const before = reads
@@ -899,8 +899,8 @@ test('early in a window the forecast starts from the usual pace: a quick 4% does
   world(on, [{ kind: 'five_hour', percentUsed: 4, resetsAt: iso(5 * HOUR - 10 * MIN) }])
   await $.session.measure(MEASURE)
   const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
-  expect(await ui.find({ text: /^On track\./ })).toBeDefined()
-  expect(await ui.find({ text: 'On pace for about 60% by reset – resets in 4h 50m' })).toBeDefined()
+  expect(await ui.find({ text: /^On track/ })).toBeDefined()
+  expect(await ui.find({ text: 'About 60% at reset – resets in 4h 50m' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -914,7 +914,7 @@ test('the usual pace is learned from how far past windows got', async ($, on) =>
   await $.session.measure(MEASURE)
   const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
   // usual 20%: 4% + about 31% more
-  expect(await ui.find({ text: 'On pace for about 35% by reset – resets in 4h 50m' })).toBeDefined()
+  expect(await ui.find({ text: 'About 35% at reset – resets in 4h 50m' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -940,16 +940,16 @@ test("a reopened chat's first reply, re-reading its history, is left out of the 
   await $.turn.complete(TURN)
   const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
   // paced on the 10% of real use, not 30%: on track at about 70%, not running out
-  expect(await ui.find({ text: /^On track\./ })).toBeDefined()
+  expect(await ui.find({ text: /^On track/ })).toBeDefined()
   expect(await ui.find({ text: '30%' })).toBeDefined()
-  expect(await ui.find({ text: 'On pace for about 70% by reset – resets in 4h' })).toBeDefined()
+  expect(await ui.find({ text: 'About 70% at reset – resets in 4h' })).toBeDefined()
 
   // later replies count in full
   await $.turn.start({ text: 'more', turnId: 't2' } as never)
   await clock.advance(1_000)
   state.percent = 50
   await $.session.measure(MEASURE)
-  expect(await ui.find({ text: /^At this pace you'll run out/ })).toBeDefined()
+  expect(await ui.find({ text: /^You'll run out/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -994,7 +994,7 @@ test('a limit bar and its % turn amber from 75% used and red from 90%, even on t
     await clock.advance(1_000)
     await $.session.measure(MEASURE)
     const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
-    expect(await ui.find({ text: /^On track\./ })).toBeDefined()
+    expect(await ui.find({ text: /^On track/ })).toBeDefined()
     expect((await ui.find({ type: 'Text', text: `${percent}%` }))?.props.color).toBe(color)
     await ui.unmount()
   }
@@ -1014,7 +1014,7 @@ test('Context turns amber from 50% and red from 80%', async ($, on) => {
     await clock.advance(1_000)
     await $.session.measure(MEASURE)
     const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
-    expect((await ui.find({ type: 'Text', text: `${percent}% used` }))?.props.color).toBe(color)
+    expect((await ui.find({ type: 'Text', text: `${percent}%` }))?.props.color).toBe(color)
     await ui.unmount()
   }
 })
@@ -1048,13 +1048,13 @@ test('the cache: a WARM pill with its minutes left after a reply, amber near the
   for await (const _ of $.turn.step({ turnId: 't1', index: 0, model: 'claude', messageCount: 1 })) void _
   ui = await draw()
   expect((await pill(ui))?.props.alt).toBe('Cache warm')
-  expect(String((await pill(ui))?.props.source)).toContain('fill="#e57b74"')
-  expect((await ui.find({ type: 'Text', text: '5m left' }))?.props.color).toBe('#e57b74')
+  expect(String((await pill(ui))?.props.source)).toContain('fill="#4ade80"')
+  expect((await ui.find({ type: 'Text', text: '5m left' }))?.props.color).toBe('#4ade80')
   await ui.unmount()
   // the terminal: the word on a coloured run
   ui = await draw('terminal')
   expect((await ui.find({ type: 'Text', text: ' WARM ' }))).toBeDefined()
-  expect((await ui.findAll({ type: 'Box' })).some(b => b.props.backgroundColor === '#e57b74')).toBe(true)
+  expect((await ui.findAll({ type: 'Box' })).some(b => b.props.backgroundColor === '#4ade80')).toBe(true)
   await ui.unmount()
 
   await clock.advance(4 * MIN + 30_000)
@@ -1065,8 +1065,8 @@ test('the cache: a WARM pill with its minutes left after a reply, amber near the
   await clock.advance(MIN)
   ui = await draw()
   expect((await pill(ui))?.props.alt).toBe('Cache cold')
-  expect(String((await pill(ui))?.props.source)).toContain('fill="#7fb4d1"')
-  expect((await ui.find({ type: 'Text', text: '6m idle' }))?.props.color).toBe('#7fb4d1')
+  expect(String((await pill(ui))?.props.source)).toContain('fill="#94a3b8"')
+  expect((await ui.find({ type: 'Text', text: '6m idle' }))?.props.color).toBe('#94a3b8')
   expect(await ui.find({ type: 'Text', text: 'next reply rewrites 150k' })).toBeDefined()
   // collapsed: the pill leads the header, so the row of bars keeps its width
   const contextBar = async () => (await ui.findAll({ type: 'Svg' })).find(svg => /^Context/.test(String(svg.props.alt)))
