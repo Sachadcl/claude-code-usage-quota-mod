@@ -1067,10 +1067,14 @@ test('the cache: a WARM pill with its minutes left after a reply, amber near the
   expect(String((await pill(ui))?.props.source)).toContain('fill="#7fb4d1"')
   expect((await ui.find({ type: 'Text', text: '6m idle' }))?.props.color).toBe('#7fb4d1')
   expect(await ui.find({ type: 'Text', text: 'next reply rewrites 150k' })).toBeDefined()
-  // collapsed: the pill beside Context
+  // collapsed: the pill leads the header, so the row of bars keeps its width
+  const contextBar = async () => (await ui.findAll({ type: 'Svg' })).find(svg => /^Context/.test(String(svg.props.alt)))
   await ui.press({ key: 'collapse' })
   expect((await pill(ui))?.props.alt).toBe('Cache cold')
   expect(await ui.find({ type: 'Text', text: '6m idle' })).toBeDefined()
+  expect(await contextBar()).toBeDefined()
+  const svgs = (await ui.findAll({ type: 'Svg' })).map(svg => String(svg.props.alt))
+  expect(svgs.indexOf('Cache cold')).toBeLessThan(svgs.findIndex(alt => /^5 Hour|^Weekly|^Context/.test(alt)))
   await ui.press({ key: 'collapse' })
   await ui.unmount()
 

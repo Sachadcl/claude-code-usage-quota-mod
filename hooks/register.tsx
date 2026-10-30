@@ -1167,7 +1167,8 @@ export const register: Register = on => {
     // the terminal draws its own hide control ([-]) over the band's top-right
     // corner: the first row keeps clear of it
     const HOST_HIDE = Svg ? 0 : 4
-    const isHeadBeside = width >= (head?.text.length ?? 0) * (Svg ? 0.8 : 1) + CONTROLS + HOST_HIDE
+    const pillCells = collapsed && cacheState ? PILL_CELLS + cacheState.short.length + 3 : 0
+    const isHeadBeside = width >= (head?.text.length ?? 0) * (Svg ? 0.8 : 1) + CONTROLS + pillCells + HOST_HIDE
     // the windows and the context side by side, or one above the other
     const isSplit = width >= 84
     const column = isSplit ? Math.floor((width - 4) / 2) : width
@@ -1184,8 +1185,11 @@ export const register: Register = on => {
     const askWords = (ask ? `Context is already at ${ask.percent}%, past ${ask.at}%. Auto compact:`.length : 0) + ASK_LABELS.join('').length
     const isAskLine = width >= askWords * (Svg ? 0.8 : 1) + ASK_LABELS.length * (Svg ? 3 : 4) + 3
 
+    // collapsed, the cache's pill leads the controls: the row of bars keeps all its width
+    const headPill = collapsed && cacheState ? cacheState : undefined
     const controls = (
       <Box flexDirection="row" alignItems="center" columnGap={1} flexShrink={0} flexWrap="wrap">
+        {headPill ? <Box marginRight={2}>{cachePill(headPill)}</Box> : null}
         {/* auto compact: the switch (the press), its name, the % field beside it,
             then a wide gap so the field reads as the switch's, not Compact's */}
         {Svg ? (
@@ -1385,18 +1389,15 @@ export const register: Register = on => {
         color: f.color, marker: markerOf(f), segments: limitSegments(f), f: f as Forecast | undefined,
       })),
       // Context with the whole window, as the limits have their time: 1M, 200k
-      { label: 'Context', short: 'Context', until: tokens(snap.window), percent: snap.percent, color: fillColor(snap.percent), marker: undefined as number | undefined, segments: contextSegments, f: undefined as Forecast | undefined, cache: cacheState },
-    ] as { label: string; short: string; until: string; percent: number; color: string; marker: number | undefined; segments: Segment[]; f: Forecast | undefined; cache?: CacheLook }[]
+      { label: 'Context', short: 'Context', until: tokens(snap.window), percent: snap.percent, color: fillColor(snap.percent), marker: undefined as number | undefined, segments: contextSegments, f: undefined as Forecast | undefined },
+    ]
     const nameOf = (item: (typeof compactItems)[number]) => (
       <Box flexDirection="row" columnGap={1} flexShrink={0}>
         <Text bold>{item.short}</Text>
         {item.until ? <Text color={MUTED}>{item.until}</Text> : null}
-        {/* the cache beside Context: a dot and its minutes left, or "cold" */}
-        {item.cache ? cachePill(item.cache) : null}
       </Box>
     )
-    const nameLength = (item: (typeof compactItems)[number]) =>
-      item.short.length + (item.until ? item.until.length + 1 : 0) + (item.cache ? PILL_CELLS + item.cache.short.length + 2 : 0)
+    const nameLength = (item: (typeof compactItems)[number]) => item.short.length + (item.until ? item.until.length + 1 : 0)
     const third = Math.floor((width - 2 * 3) / 3)
     // Collapsed, one row: each limit sits in a slot of fixed width, so W always starts at
     // the same place: its name, room for the longest time ("4h 59m", "6d 23h"), its bar
