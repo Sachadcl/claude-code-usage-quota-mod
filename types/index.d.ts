@@ -24,6 +24,9 @@ export type AutoCompact = { isOn: boolean; at: number | null }
 /** what holds auto compact back in a chat: an ask (or "after my next compact"), or a compaction that left it past the % */
 export type Hold = { chat: string; waits: boolean; stuck: boolean }
 
+/** the prompt cache: when the main thread's last request was answered, what it held, and how long it lives */
+export type Cache = { at: number; tokens: number; ttl: number }
+
 declare module 'claude-code' {
   interface PluginState {
     'usage-quota': {
@@ -39,6 +42,8 @@ declare module 'claude-code' {
       fieldText: string | null
       /** the desktop app's theme, as its settings (or the OS) have it */
       theme: 'dark' | 'light'
+      /** the prompt cache as this chat's last reply left it; null before any reply */
+      cache: Cache | null
     }
   }
 }

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionRateLimit } from 'claude-code'
 
-import type { AutoCompact, Category, Hold, Limit, PaceOf, Snapshot } from '../types'
+import type { AutoCompact, Cache, Category, Hold, Limit, PaceOf, Snapshot } from '../types'
 
 const snapshot = atom({ plugin: 'usage-quota', key: 'snapshot' } as const, null)
 const isOn = atom({ plugin: 'usage-quota', key: 'isOn' } as const, true)
@@ -15,12 +15,14 @@ const autoAsk = atom({ plugin: 'usage-quota', key: 'autoAsk' } as const, null as
 // what holds auto compact back, and in which chat: kept in state so a reload (an
 // update, /reload-plugins) keeps it, where a module variable would start over
 const hold = atom({ plugin: 'usage-quota', key: 'hold' } as const, { chat: '', waits: false, stuck: false } as Hold)
+const cache = atom({ plugin: 'usage-quota', key: 'cache' } as const, null as Cache | null)
 
 // two palettes, the desktop's dark and light themes; the band draws in the one the
 // app shows (Theme), set at the start of every draw so all colours below follow it
 type Palette = {
   muted: string; green: string; greenText: string; amber: string; red: string; free: string; buffer: string; track: string
   palette: string[]; named: Record<string, string>; switchOff: string; switchOn: string; switchLit: string; compactLit: string
+  warm: string; cold: string; pillInk: string
 }
 const DARK: Palette = {
   muted: '#8b90a0', green: '#4ade80', greenText: '#4ade80', amber: '#fbbf24', red: '#f87171',
@@ -31,6 +33,7 @@ const DARK: Palette = {
     'Custom agents': '#34d399', 'Memory files': '#fbbf24', Skills: '#fb923c', Messages: '#22d3ee',
   },
   switchOff: '#4b5163', switchOn: '#4ade80', switchLit: '#8b919c', compactLit: '#5a606e',
+  warm: '#e57b74', cold: '#7fb4d1', pillInk: '#1b1d24',
 }
 // light: the same hues, deep enough to read on the pale band; the tracks pale
 const LIGHT: Palette = {
@@ -42,6 +45,7 @@ const LIGHT: Palette = {
     'Custom agents': '#10b981', 'Memory files': '#f59e0b', Skills: '#f97316', Messages: '#0ea5e9',
   },
   switchOff: '#b4b9c4', switchOn: '#22c55e', switchLit: '#c3c7cf', compactLit: '#d6d9df',
+  warm: '#d4544b', cold: '#3d86b8', pillInk: '#ffffff',
 }
 let MUTED = DARK.muted
 let GREEN = DARK.green
@@ -59,9 +63,14 @@ let SWITCH_ON = DARK.switchOn
 let SWITCH_LIT = DARK.switchLit
 // Compact's hover: clearly lighter than its resting chrome, its label still reads
 let COMPACT_LIT = DARK.compactLit
+// the cache's pill: a warm red while the cache holds, a cold blue once it lapsed
+let WARM = DARK.warm
+let COLD = DARK.cold
+let PILL_INK = DARK.pillInk
 function usePalette(p: Palette): void {
   ;({ muted: MUTED, green: GREEN, greenText: GREEN_TEXT, amber: AMBER, red: RED, free: FREE, buffer: BUFFER, track: TRACK } = p)
   ;({ palette: PALETTE, named: NAMED, switchOff: SWITCH_OFF, switchOn: SWITCH_ON, switchLit: SWITCH_LIT, compactLit: COMPACT_LIT } = p)
+  ;({ warm: WARM, cold: COLD, pillInk: PILL_INK } = p)
 }
 const CELLS = 16
 const HOUR = 3_600_000
@@ -178,6 +187,44 @@ function headline(list: Forecast[], now: number): { text: string; color: string 
     text: `On track. You should reach ${resetName(lead.resetsAt, now)} with room to spare.`,
     color: GREEN,
   }
+}
+
+// The prompt cache: every reply leaves the chat's context cached for a while, and the
+// next reply within that time reads it back for a tenth of the price; past it the next
+// reply writes the whole context again, a jump in the limits. Claude Code caches for an
+// hour on a Claude login, 5 minutes on an API key. Amber for the last sixth of it
+const CACHE_TTL_LOGIN = HOUR
+const CACHE_TTL_KEY = 5 * 60_000
+let cacheTtl = CACHE_TTL_LOGIN
+/** `short`: the minutes left, or how long it sat idle; `rewrites`: what the next reply writes again */
+type CacheLook = { label: 'WARM' | 'COLD'; short: string; color: string; rewrites?: number }
+function cacheLook(c: Cache, now: number): CacheLook {
+  const left = c.at + c.ttl - now
+  if (left <= 0) {
+    // cold: how long the chat has sat idle, and what the next reply writes again
+    const idle = duration(now - c.at)
+    return { label: 'COLD', short: `${idle} idle`, color: COLD, ...(c.tokens > 0 ? { rewrites: c.tokens } : {}) }
+  }
+  const min = Math.ceil(left / 60_000)
+  return { label: 'WARM', short: `${min}m left`, color: left <= Math.max(60_000, c.ttl / 6) ? AMBER : WARM }
+}
+
+// the pill's cells: its word and a cell of room each side
+const PILL_CELLS = 6
+const PILL_H = 16
+function pillSvg(label: string, color: string): string {
+  const w = PILL_CELLS * 8
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${PILL_H}" viewBox="0 0 ${w} ${PILL_H}">` +
+    `<rect width="${w}" height="${PILL_H}" rx="${PILL_H / 2}" fill="${color}"/>` +
+    `<text x="${w / 2}" y="${PILL_H / 2}" dominant-baseline="central" text-anchor="middle" fill="${PILL_INK}" ` +
+    `font-family="-apple-system, system-ui, sans-serif" font-size="9.5" font-weight="700" letter-spacing="0.6">${label}</text></svg>`
+  )
+}
+
+async function saveCache($: EngineInterface, next: Cache | null): Promise<void> {
+  await update($, cache, () => next)
+  await storeSet($, `cache:${await chatId($)}`, next)
 }
 
 function tokens(n: number): string {
@@ -689,6 +736,9 @@ async function loadAuto($: EngineInterface): Promise<void> {
   const id = await chatId($)
   if (id === autoChat) return
   autoChat = id
+  // the cache this chat's last reply left, an app restart or a reopened chat included
+  const savedCache = (await storeGet($, `cache:${id}`)) as Cache | null | undefined
+  await update($, cache, () => savedCache ?? null)
   const saved = (await storeGet($, `autoCompact:${id}`)) as AutoCompact | undefined
   await update($, autoCompact, () => (saved ? { ...saved, at: saved.at ?? AT_DEFAULT } : { isOn: false, at: AT_DEFAULT }))
   // the same chat after a reload keeps its ask and what holds it back
@@ -958,6 +1008,12 @@ export const register: Register = on => {
     }
     await loadAuto($)
     await syncCollapsed($)
+    try {
+      const auth = await $.session.authorize()
+      cacheTtl = auth?.kind === 'bearer' ? CACHE_TTL_LOGIN : CACHE_TTL_KEY
+    } catch {
+      cacheTtl = CACHE_TTL_LOGIN
+    }
     // a chat just opened: its limits now, unless another chat asked a moment ago
     await refresh($, 'due')
     // the exact count on a timer, never from the hook itself: work a hook starts and
@@ -1007,6 +1063,17 @@ export const register: Register = on => {
     }
     await commitDraft($)
     return next(e)
+  })
+
+  // each reply of the main thread caches the context afresh: the clock starts over
+  // (turn.step streams: the hook passes the chunks through and reads the result)
+  on('turn.step', async function* ($, e, next) {
+    const result = yield* next(e)
+    if (e.agentId === undefined && result.usage) {
+      const held = result.usage.cache_read_input_tokens + result.usage.cache_creation_input_tokens
+      await saveCache($, { at: await $.clock.now(), tokens: held, ttl: cacheTtl })
+    }
+    return result
   })
 
   on('turn.complete', async ($, e, next) => {
@@ -1061,6 +1128,23 @@ export const register: Register = on => {
         : snap.limitsError && limits.length === 0
           ? `usage check ${snap.limitsError}`
           : undefined
+    const cached = await read($, cache)
+    const cacheState = cached ? cacheLook(cached, now) : undefined
+    // the cache's state as a pill: a rounded Svg on the desktop, a coloured run on the terminal
+    const cachePill = (look: CacheLook) => (
+      <Box flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
+        {Svg ? (
+          <Box width={PILL_CELLS} height={1} alignItems="center" flexShrink={0}>
+            <Svg alt={`Cache ${look.label.toLowerCase()}`} source={pillSvg(look.label, look.color)} height={PILL_H} />
+          </Box>
+        ) : (
+          <Box backgroundColor={look.color} flexShrink={0}>
+            <Text bold color={PILL_INK}>{` ${look.label} `}</Text>
+          </Box>
+        )}
+        <Text bold color={look.color}>{look.short}</Text>
+      </Box>
+    )
     const collapsed = await read($, isCollapsed)
     const auto = await read($, autoCompact)
     const ask = await read($, autoAsk)
@@ -1280,6 +1364,12 @@ export const register: Register = on => {
               <Text color={MUTED}>{tokens(c.tokens)}</Text>
             </Box>
           ))}
+        {cacheState ? (
+          <Box flexDirection="row" justifyContent="space-between" columnGap={2}>
+            {cachePill(cacheState)}
+            {cacheState.rewrites ? <Text color={MUTED} wrap="wrap">{`next reply rewrites ${tokens(cacheState.rewrites)}`}</Text> : null}
+          </Box>
+        ) : null}
       </Box>
     )
 
@@ -1295,15 +1385,18 @@ export const register: Register = on => {
         color: f.color, marker: markerOf(f), segments: limitSegments(f), f: f as Forecast | undefined,
       })),
       // Context with the whole window, as the limits have their time: 1M, 200k
-      { label: 'Context', short: 'Context', until: tokens(snap.window), percent: snap.percent, color: fillColor(snap.percent), marker: undefined as number | undefined, segments: contextSegments, f: undefined as Forecast | undefined },
-    ]
+      { label: 'Context', short: 'Context', until: tokens(snap.window), percent: snap.percent, color: fillColor(snap.percent), marker: undefined as number | undefined, segments: contextSegments, f: undefined as Forecast | undefined, cache: cacheState },
+    ] as { label: string; short: string; until: string; percent: number; color: string; marker: number | undefined; segments: Segment[]; f: Forecast | undefined; cache?: CacheLook }[]
     const nameOf = (item: (typeof compactItems)[number]) => (
       <Box flexDirection="row" columnGap={1} flexShrink={0}>
         <Text bold>{item.short}</Text>
         {item.until ? <Text color={MUTED}>{item.until}</Text> : null}
+        {/* the cache beside Context: a dot and its minutes left, or "cold" */}
+        {item.cache ? cachePill(item.cache) : null}
       </Box>
     )
-    const nameLength = (item: (typeof compactItems)[number]) => item.short.length + (item.until ? item.until.length + 1 : 0)
+    const nameLength = (item: (typeof compactItems)[number]) =>
+      item.short.length + (item.until ? item.until.length + 1 : 0) + (item.cache ? PILL_CELLS + item.cache.short.length + 2 : 0)
     const third = Math.floor((width - 2 * 3) / 3)
     // Collapsed, one row: each limit sits in a slot of fixed width, so W always starts at
     // the same place: its name, room for the longest time ("4h 59m", "6d 23h"), its bar

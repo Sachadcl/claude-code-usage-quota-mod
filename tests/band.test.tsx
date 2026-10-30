@@ -1017,3 +1017,66 @@ test('Context turns amber from 50% and red from 80%', async ($, on) => {
     await ui.unmount()
   }
 })
+
+test('the cache: a WARM pill with its minutes left after a reply, amber near the end, then COLD', async ($, on) => {
+  const clock = startWorld(on, { value: 16 }, [])
+  // beneath the plugin, each request answers with what the cache read and wrote
+  on('turn.step', async function* (_$, e) {
+    return {
+      turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn',
+      usage: { model: 'claude', input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 140_000, cache_creation_input_tokens: 10_000 },
+    }
+  })
+  await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
+  const draw = async (surface: (typeof SURFACES)[number] = 'desktop') =>
+    $.ui.mount({ plugin: 'usage-quota', surface, component: 'AbovePrompt', props: PROPS })
+  const pill = async (ui: Awaited<ReturnType<typeof draw>>) => (await ui.findAll({ type: 'Svg' })).find(svg => /^Cache/.test(String(svg.props.alt)))
+
+  // no reply yet: nothing to say about the cache
+  let ui = await draw()
+  expect(await pill(ui)).toBeUndefined()
+  await ui.unmount()
+
+  // a subagent's request leaves the chat's own cache alone
+  for await (const _ of $.turn.step({ turnId: 't0', index: 0, model: 'claude', messageCount: 1, agentId: 'a1' })) void _
+  ui = await draw()
+  expect(await pill(ui)).toBeUndefined()
+  await ui.unmount()
+
+  // an API key here (no Claude login): the cache lives 5 minutes
+  for await (const _ of $.turn.step({ turnId: 't1', index: 0, model: 'claude', messageCount: 1 })) void _
+  ui = await draw()
+  expect((await pill(ui))?.props.alt).toBe('Cache warm')
+  expect(String((await pill(ui))?.props.source)).toContain('fill="#e57b74"')
+  expect((await ui.find({ type: 'Text', text: '5m left' }))?.props.color).toBe('#e57b74')
+  await ui.unmount()
+  // the terminal: the word on a coloured run
+  ui = await draw('terminal')
+  expect((await ui.find({ type: 'Text', text: ' WARM ' }))).toBeDefined()
+  expect((await ui.findAll({ type: 'Box' })).some(b => b.props.backgroundColor === '#e57b74')).toBe(true)
+  await ui.unmount()
+
+  await clock.advance(4 * MIN + 30_000)
+  ui = await draw()
+  expect((await ui.find({ type: 'Text', text: '1m left' }))?.props.color).toBe('#fbbf24')
+  await ui.unmount()
+
+  await clock.advance(MIN)
+  ui = await draw()
+  expect((await pill(ui))?.props.alt).toBe('Cache cold')
+  expect(String((await pill(ui))?.props.source)).toContain('fill="#7fb4d1"')
+  expect((await ui.find({ type: 'Text', text: '6m idle' }))?.props.color).toBe('#7fb4d1')
+  expect(await ui.find({ type: 'Text', text: 'next reply rewrites 150k' })).toBeDefined()
+  // collapsed: the pill beside Context
+  await ui.press({ key: 'collapse' })
+  expect((await pill(ui))?.props.alt).toBe('Cache cold')
+  expect(await ui.find({ type: 'Text', text: '6m idle' })).toBeDefined()
+  await ui.press({ key: 'collapse' })
+  await ui.unmount()
+
+  // the next reply warms it again
+  for await (const _ of $.turn.step({ turnId: 't2', index: 0, model: 'claude', messageCount: 3 })) void _
+  ui = await draw()
+  expect((await pill(ui))?.props.alt).toBe('Cache warm')
+  await ui.unmount()
+})
